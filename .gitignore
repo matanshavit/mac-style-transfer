@@ -12,5 +12,5 @@ __pycache__/
 *.pyc
 
 # large local data
-data/
+/data/
 Tools/python/cache/

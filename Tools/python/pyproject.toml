@@ -1,0 +1,14 @@
+[project]
+name = "stylecam-tools"
+version = "0.1.0"
+description = "Core ML conversion of the Magenta arbitrary style network for StyleCam"
+requires-python = "==3.12.*"
+dependencies = [
+    "coremltools==9.0",
+    "numpy",
+    "pillow",
+    "torch==2.7.1",
+]
+
+[tool.uv]
+package = false
