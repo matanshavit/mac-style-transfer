@@ -1,0 +1,122 @@
+[
+  {
+    "id": "starry_night",
+    "title": "The Starry Night",
+    "artist": "Vincent van Gogh",
+    "year": "1889",
+    "file": "starry_night.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg"
+  },
+  {
+    "id": "great_wave",
+    "title": "The Great Wave off Kanagawa",
+    "artist": "Katsushika Hokusai",
+    "year": "c. 1831",
+    "file": "great_wave.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:The_Great_Wave_off_Kanagawa.jpg"
+  },
+  {
+    "id": "the_scream",
+    "title": "The Scream",
+    "artist": "Edvard Munch",
+    "year": "1893",
+    "file": "the_scream.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:The_Scream.jpg"
+  },
+  {
+    "id": "the_water_lily_pond",
+    "title": "The Water-Lily Pond",
+    "artist": "Claude Monet",
+    "year": "1899",
+    "file": "the_water_lily_pond.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:The_Water-Lily_Pond_1899_Claude_Monet_Metropolitan.jpg"
+  },
+  {
+    "id": "girl_with_pearl_earring",
+    "title": "Girl with a Pearl Earring",
+    "artist": "Johannes Vermeer",
+    "year": "c. 1665",
+    "file": "girl_with_pearl_earring.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:1665_Girl_with_a_Pearl_Earring.jpg"
+  },
+  {
+    "id": "the_kiss",
+    "title": "The Kiss",
+    "artist": "Gustav Klimt",
+    "year": "1908",
+    "file": "the_kiss.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg"
+  },
+  {
+    "id": "american_gothic",
+    "title": "American Gothic",
+    "artist": "Grant Wood",
+    "year": "1930",
+    "file": "american_gothic.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:Grant_Wood_-_American_Gothic_(1930).jpg"
+  },
+  {
+    "id": "birth_of_venus",
+    "title": "The Birth of Venus",
+    "artist": "Sandro Botticelli",
+    "year": "c. 1485",
+    "file": "birth_of_venus.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:Sandro_Botticelli_-_La_nascita_di_Venere_-_Google_Art_Project_-_edited.jpg"
+  },
+  {
+    "id": "last_supper",
+    "title": "The Last Supper",
+    "artist": "Leonardo da Vinci",
+    "year": "c. 1498",
+    "file": "last_supper.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:Leonardo_da_Vinci_(1452-1519)_-_The_Last_Supper_(1495-1498).jpg"
+  },
+  {
+    "id": "sunday_afternoon",
+    "title": "A Sunday on La Grande Jatte",
+    "artist": "Georges Seurat",
+    "year": "1884",
+    "file": "sunday_afternoon.png",
+    "source": "https://commons.wikimedia.org/wiki/File:A_Sunday_on_La_Grande_Jatte,_Georges_Seurat,_1884.png"
+  },
+  {
+    "id": "potato_eaters",
+    "title": "The Potato Eaters",
+    "artist": "Vincent van Gogh",
+    "year": "1885",
+    "file": "potato_eaters.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:Vincent_van_Gogh_-_The_potato_eaters_-_Google_Art_Project_(5776925).jpg"
+  },
+  {
+    "id": "garden_earthly_delights",
+    "title": "The Garden of Earthly Delights",
+    "artist": "Hieronymus Bosch",
+    "year": "c. 1500",
+    "file": "garden_earthly_delights.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:The_Garden_of_Earthly_Delights_by_Bosch_High_Resolution.jpg"
+  },
+  {
+    "id": "hay_wain",
+    "title": "The Hay Wain",
+    "artist": "John Constable",
+    "year": "1821",
+    "file": "hay_wain.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:John_Constable_-_The_Hay_Wain_(1821).jpg"
+  },
+  {
+    "id": "mondrian_composition",
+    "title": "Composition II in Red, Blue, and Yellow",
+    "artist": "Piet Mondrian",
+    "year": "1930",
+    "file": "mondrian_composition.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:Piet_Mondriaan,_1930_-_Mondrian_Composition_II_in_Red,_Blue,_and_Yellow.jpg"
+  },
+  {
+    "id": "kandinsky_composition",
+    "title": "Composition VIII",
+    "artist": "Wassily Kandinsky",
+    "year": "1923",
+    "file": "kandinsky_composition.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:Wassily_Kandinsky_Composition_VIII.jpg"
+  }
+]
