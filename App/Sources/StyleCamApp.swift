@@ -4,8 +4,11 @@ import SwiftUI
 struct StyleCamApp: App {
     var body: some Scene {
         WindowGroup {
-            Text("StyleCam")
-                .frame(minWidth: 640, minHeight: 400)
+            VStack(spacing: 16) {
+                Text("StyleCam")
+                VirtualCameraSettingsView()
+            }
+            .frame(minWidth: 640, minHeight: 400)
         }
     }
 }
