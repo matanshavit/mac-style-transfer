@@ -1,13 +1,16 @@
 import Foundation
 import StyleKit
 
-func pushTest(uid: String, name: String?, seconds: Double) throws -> Int32 {
+func pushTest(_ arguments: Arguments) throws -> Int32 {
+    let uid = try arguments.required("uid")
+    let name = arguments.string("name")
+    let seconds = try arguments.positiveNumber("seconds") ?? 10
     let frameRate = 30
     guard let frameCount = Int(exactly: (seconds * Double(frameRate)).rounded()) else {
-        throw Options.UsageError(description: "--seconds is too large")
+        throw UsageError(description: "--seconds is too large")
     }
     guard frameCount > 0 else {
-        throw Options.UsageError(description: "--seconds must be at least one frame (1/\(frameRate) s)")
+        throw UsageError(description: "--seconds must be at least one frame (1/\(frameRate) s)")
     }
 
     let output = VirtualCameraOutput(deviceUID: uid, fallbackDeviceName: name, clientCountSelector: "scsc")
