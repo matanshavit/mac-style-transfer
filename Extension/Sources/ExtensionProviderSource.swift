@@ -17,7 +17,9 @@ final class ExtensionProviderSource: NSObject, CMIOExtensionProviderSource {
 
     func connect(to client: CMIOExtensionClient) throws {}
 
-    func disconnect(from client: CMIOExtensionClient) {}
+    func disconnect(from client: CMIOExtensionClient) {
+        deviceSource.disconnect(client)
+    }
 
     var availableProperties: Set<CMIOExtensionProperty> {
         [.providerName, .providerManufacturer]

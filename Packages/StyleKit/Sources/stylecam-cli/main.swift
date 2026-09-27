@@ -20,7 +20,7 @@ case "devices":
 case "push-test":
     do {
         let options = try Options(Array(arguments), allowed: ["--uid", "--name", "--seconds"])
-        exit(pushTest(uid: try options.required("--uid"), name: options["--name"], seconds: try options.positiveNumber("--seconds") ?? 10))
+        exit(try pushTest(uid: try options.required("--uid"), name: options["--name"], seconds: try options.positiveNumber("--seconds") ?? 10))
     } catch {
         printError("\(error)\n\n\(usage)")
         exit(EX_USAGE)

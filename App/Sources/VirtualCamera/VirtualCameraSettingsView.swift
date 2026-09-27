@@ -14,6 +14,7 @@ struct VirtualCameraSettingsView: View {
                 .multilineTextAlignment(.center)
         }
         .padding()
+        .onAppear { extensionManager.refresh() }
     }
 
     private var status: String {

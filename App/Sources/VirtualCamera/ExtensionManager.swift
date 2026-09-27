@@ -16,17 +16,22 @@ final class ExtensionManager: NSObject {
     }
 
     private enum Action {
+        case query
         case activate
         case deactivate
     }
 
-    private(set) var state: State = isInApplicationsFolder ? .idle : .requiresApplicationsFolder
+    private(set) var state: State = initialState
 
     @ObservationIgnored private var pendingActions: [ObjectIdentifier: Action] = [:]
     @ObservationIgnored private let logger = Logger(subsystem: "com.matanshavit.StyleCam", category: "extension")
 
-    private static var isInApplicationsFolder: Bool {
-        Bundle.main.bundleURL.standardizedFileURL.path.hasPrefix("/Applications/")
+    private static var initialState: State {
+        Bundle.main.bundleURL.standardizedFileURL.path.hasPrefix("/Applications/") ? .idle : .requiresApplicationsFolder
+    }
+
+    func refresh() {
+        submit(.propertiesRequest(forExtensionWithIdentifier: StyleCamIDs.extensionBundleID, queue: .main), action: .query)
     }
 
     func install() {
@@ -58,8 +63,22 @@ extension ExtensionManager: @MainActor OSSystemExtensionRequestDelegate {
         state = .needsApproval
     }
 
+    func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) {
+        pendingActions.removeValue(forKey: ObjectIdentifier(request))
+        guard !pendingActions.values.contains(where: { $0 != .query }) else { return }
+        if properties.contains(where: \.isAwaitingUserApproval) {
+            state = .needsApproval
+        } else if properties.contains(where: { $0.isEnabled && !$0.isUninstalling }) {
+            state = .activated
+        } else if properties.contains(where: \.isUninstalling) {
+            state = .needsReboot
+        } else {
+            state = Self.initialState
+        }
+    }
+
     func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        let action = pendingActions.removeValue(forKey: ObjectIdentifier(request))
+        guard let action = pendingActions.removeValue(forKey: ObjectIdentifier(request)), action != .query else { return }
         switch result {
         case .completed:
             state = action == .deactivate ? .idle : .activated
@@ -71,8 +90,9 @@ extension ExtensionManager: @MainActor OSSystemExtensionRequestDelegate {
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: any Error) {
-        pendingActions.removeValue(forKey: ObjectIdentifier(request))
+        let action = pendingActions.removeValue(forKey: ObjectIdentifier(request))
         logger.error("System extension request failed: \(error.localizedDescription)")
+        guard let action, action != .query else { return }
         if let error = error as? OSSystemExtensionError, error.code == .unsupportedParentBundleLocation {
             state = .requiresApplicationsFolder
         } else {

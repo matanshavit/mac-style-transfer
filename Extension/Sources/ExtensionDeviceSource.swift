@@ -24,7 +24,7 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
     private let logger = Logger(subsystem: "com.matanshavit.StyleCam.Extension", category: "device")
     private let queue = DispatchQueue(label: "com.matanshavit.StyleCam.Extension.frames", qos: .userInteractive)
     private let sourceClientCountProperty = CMIOExtensionProperty(rawValue: StyleCamIDs.sourceClientCountProperty)
-    private let sourceStreaming = Atomic<Bool>(false)
+    private let sourceStartCount = Mutex(0)
 
     private let placeholder: PlaceholderFrame?
     private var sinkClient: CMIOExtensionClient?
@@ -32,6 +32,7 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
     private var consumeInFlight = false
     private var placeholderTimer: DispatchSourceTimer?
     private var lastSinkFrameNanos: UInt64 = 0
+    private var lastSourceFrameNanos: UInt64 = 0
     private var formatDescription: CMVideoFormatDescription?
     private var loggedRejectedFrame = false
 
@@ -112,17 +113,31 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
     func setDeviceProperties(_ deviceProperties: CMIOExtensionDeviceProperties) throws {}
 
     func startSource() {
-        sourceStreaming.store(true, ordering: .relaxed)
+        let starts = sourceStartCount.withLock { count in
+            count += 1
+            return count
+        }
         publishSourceClientCount()
-        queue.async { self.startPlaceholderTimer() }
-        logger.info("Source stream started")
+        queue.async { self.updateTimers() }
+        logger.info("Source stream started, \(starts) active")
     }
 
     func stopSource() {
-        sourceStreaming.store(false, ordering: .relaxed)
+        let starts = sourceStartCount.withLock { count in
+            count = max(0, count - 1)
+            return count
+        }
         publishSourceClientCount()
-        queue.async { self.stopPlaceholderTimer() }
-        logger.info("Source stream stopped")
+        queue.async { self.updateTimers() }
+        logger.info("Source stream stopped, \(starts) active")
+    }
+
+    func sourceFrameDurationChanged() {
+        queue.async {
+            self.placeholderTimer?.cancel()
+            self.placeholderTimer = nil
+            self.updateTimers()
+        }
     }
 
     func startSink(client: CMIOExtensionClient) {
@@ -130,25 +145,33 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
         queue.async {
             self.sinkClient = client
             self.consumeInFlight = false
-            self.startConsumeTimer()
+            self.updateTimers()
         }
-        logger.info("Sink stream started")
+        logger.info("Sink stream started by pid \(client.pid)")
     }
 
     func stopSink() {
         queue.async {
-            self.consumeTimer?.cancel()
-            self.consumeTimer = nil
             self.sinkClient = nil
             self.consumeInFlight = false
             self.lastSinkFrameNanos = 0
+            self.updateTimers()
         }
         logger.info("Sink stream stopped")
     }
 
+    func disconnect(_ client: CMIOExtensionClient) {
+        sinkStream.disconnect(client)
+    }
+
+    private var isSourceStreaming: Bool {
+        sourceStartCount.withLock { $0 > 0 }
+    }
+
     private func sourceClientCount() -> Int {
-        guard sourceStreaming.load(ordering: .relaxed) else { return 0 }
-        return max(1, sourceStream.stream.streamingClients.count)
+        let starts = sourceStartCount.withLock { $0 }
+        guard starts > 0 else { return 0 }
+        return max(starts, sourceStream.stream.streamingClients.count)
     }
 
     private func sourceClientCountState() -> CMIOExtensionPropertyState<AnyObject> {
@@ -161,9 +184,27 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
         }
     }
 
+    private func updateTimers() {
+        let sourceStreaming = isSourceStreaming
+        if sourceStreaming {
+            startPlaceholderTimer()
+        } else {
+            placeholderTimer?.cancel()
+            placeholderTimer = nil
+        }
+        if sourceStreaming, sinkClient != nil {
+            startConsumeTimer()
+        } else {
+            consumeTimer?.cancel()
+            consumeTimer = nil
+        }
+    }
+
     private func startConsumeTimer() {
-        consumeTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
+        guard consumeTimer == nil else { return }
+        // The feeder gets one placeholder delay to deliver before the placeholder shows.
+        lastSinkFrameNanos = Self.hostTimeNanos()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: 1.0 / Double(StyleCamVideo.frameRate * 3), leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in self?.consumeSinkBuffer() }
         consumeTimer = timer
@@ -180,11 +221,10 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
                 self.consumeInFlight = false
                 guard let sampleBuffer else { return }
                 let now = Self.hostTimeNanos()
-                if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer), self.isPublishable(pixelBuffer) {
+                if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer), self.isPublishable(pixelBuffer),
+                   Self.isFresh(sampleBuffer, hostTimeNanos: now) {
                     self.lastSinkFrameNanos = now
-                    if self.sourceStreaming.load(ordering: .relaxed) {
-                        self.sendToSource(pixelBuffer, hostTimeNanos: now)
-                    }
+                    self.forward(pixelBuffer, hostTimeNanos: now)
                 }
                 self.sinkStream.stream.notifyScheduledOutputChanged(
                     CMIOExtensionScheduledOutput(sequenceNumber: sequenceNumber, hostTimeInNanoseconds: now)
@@ -198,23 +238,30 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
 
     private func startPlaceholderTimer() {
         guard placeholderTimer == nil, let placeholder else { return }
+        let frameDuration = sourceStream.frameDuration
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
-        timer.schedule(deadline: .now(), repeating: Self.defaultFrameDuration.seconds, leeway: .milliseconds(1))
+        timer.schedule(deadline: .now(), repeating: frameDuration.seconds, leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Self.hostTimeNanos()
             guard now &- self.lastSinkFrameNanos > Self.placeholderAfterNanos, let frame = placeholder.makeFrame() else { return }
-            self.sendToSource(frame, hostTimeNanos: now)
+            self.sendToSource(frame, hostTimeNanos: now, frameDuration: frameDuration)
         }
         placeholderTimer = timer
         timer.activate()
     }
 
-    private func stopPlaceholderTimer() {
-        // startSource sets the flag before queueing, so a restart queued behind this stop keeps the timer.
-        guard !sourceStreaming.load(ordering: .relaxed) else { return }
-        placeholderTimer?.cancel()
-        placeholderTimer = nil
+    private func forward(_ pixelBuffer: CVPixelBuffer, hostTimeNanos: UInt64) {
+        let frameDuration = sourceStream.frameDuration
+        guard isSourceStreaming, hostTimeNanos &- lastSourceFrameNanos >= Self.nanoseconds(frameDuration) / 10 * 9 else { return }
+        sendToSource(pixelBuffer, hostTimeNanos: hostTimeNanos, frameDuration: frameDuration)
+    }
+
+    private static func isFresh(_ sampleBuffer: CMSampleBuffer, hostTimeNanos: UInt64) -> Bool {
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard presentationTime.isNumeric else { return true }
+        let age = Int64(bitPattern: hostTimeNanos) &- Int64(bitPattern: nanoseconds(presentationTime))
+        return age <= Int64(placeholderAfterNanos)
     }
 
     private func isPublishable(_ pixelBuffer: CVPixelBuffer) -> Bool {
@@ -228,7 +275,7 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
         return matches
     }
 
-    private func sendToSource(_ pixelBuffer: CVPixelBuffer, hostTimeNanos: UInt64) {
+    private func sendToSource(_ pixelBuffer: CVPixelBuffer, hostTimeNanos: UInt64, frameDuration: CMTime) {
         pixelBuffer.removeColorProfileAttachments()
 
         if formatDescription.map({ !CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: pixelBuffer) }) ?? true {
@@ -238,7 +285,7 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
         guard let formatDescription else { return }
 
         var timing = CMSampleTimingInfo(
-            duration: Self.defaultFrameDuration,
+            duration: frameDuration,
             presentationTimeStamp: CMTime(value: CMTimeValue(hostTimeNanos), timescale: 1_000_000_000),
             decodeTimeStamp: .invalid
         )
@@ -255,11 +302,15 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
             return
         }
         sourceStream.stream.send(sampleBuffer, discontinuity: [], hostTimeInNanoseconds: hostTimeNanos)
+        lastSourceFrameNanos = hostTimeNanos
     }
 
     private static func hostTimeNanos() -> UInt64 {
-        let now = CMClockGetTime(CMClockGetHostTimeClock())
-        return UInt64(CMTimeConvertScale(now, timescale: 1_000_000_000, method: .default).value)
+        nanoseconds(CMClockGetTime(CMClockGetHostTimeClock()))
+    }
+
+    private static func nanoseconds(_ time: CMTime) -> UInt64 {
+        UInt64(bitPattern: CMTimeConvertScale(time, timescale: 1_000_000_000, method: .default).value)
     }
 }
 

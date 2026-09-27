@@ -27,7 +27,7 @@ struct Options {
 
     func positiveNumber(_ flag: String) throws -> Double? {
         guard let value = values[flag] else { return nil }
-        guard let number = Double(value), number > 0 else { throw UsageError(description: "\(flag) must be a positive number") }
+        guard let number = Double(value), number.isFinite, number > 0 else { throw UsageError(description: "\(flag) must be a positive number") }
         return number
     }
 }
