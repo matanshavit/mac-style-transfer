@@ -22,6 +22,7 @@ Condensed. Links are the sources. Dates matter: checked 2026-09.
 - ANE runs instance norm natively on M1+. [arXiv 2606.22283](https://arxiv.org/abs/2606.22283) (reverse engineering, not Apple)
 - Pretrained Johnson weights (jcjohnson, lengstrom) are research-use only and cover 3 of our paintings. Train our own if we want per-style nets.
 - Create ML app dropped Style Transfer projects in Xcode 26. The `MLStyleTransfer` Swift API still exists. Trains at 512 px. [Xcode 26 notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-26-release-notes)
+- We tried Create ML (`MLStyleTransfer`) on Starry Night. It trains on the CPU only, in about 3 min per style (13 min at textel density 512). The lite model is 0.6 MB and runs 720p in 6.9 ms on the ANE. But it looks like a mild filter, and shifts of 1-3 px reshuffle the texture: strong shimmer. The stride-4 downsampling aliases, and Create ML cannot train that out. Not used.
 - Magenta arbitrary style (Apache-2.0). Old app weights: `storage.googleapis.com/magentadata/js/checkpoints/style/arbitrary/{predictor,transformer}`. No existing PyTorch port with these weights, so we wrote one.
 - Flicker: Lai 2018 is an online network (ConvLSTM, no flow at test time). [paper](https://arxiv.org/abs/1808.00449), [code, MIT](https://github.com/phoenix104104/fast_blind_video_consistency). Gupta 2017: training with noise improves stability. [paper](https://arxiv.org/abs/1705.02092)
 
