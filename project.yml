@@ -1,0 +1,93 @@
+name: StyleCam
+
+options:
+  bundleIdPrefix: com.matanshavit
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    COREML_CODEGEN_LANGUAGE: None
+    DEAD_CODE_STRIPPING: YES
+
+packages:
+  StyleKit:
+    path: Packages/StyleKit
+
+targets:
+  StyleCam:
+    type: application
+    platform: macOS
+    sources:
+      - path: App/Sources
+      - path: Shared
+      - path: App/Resources
+      - path: Models
+        optional: true
+      - path: Styles
+        type: folder
+    dependencies:
+      - package: StyleKit
+      - target: StyleCamExtension
+        copy:
+          destination: plugins
+          subpath: ../Library/SystemExtensions
+        embed: true
+        codeSign: true
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: StyleCam
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.video
+        NSCameraUsageDescription: StyleCam uses the camera to create the stylized video.
+        NSSystemExtensionUsageDescription: StyleCam installs a camera extension so other apps can use the stylized video.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.matanshavit.StyleCam
+        CODE_SIGN_ENTITLEMENTS: $(STYLECAM_APP_ENTITLEMENTS)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  StyleCamExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: Extension/Sources
+      - path: Shared
+    info:
+      path: Extension/Info.plist
+      properties:
+        CFBundleDisplayName: StyleCam Camera
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundlePackageType: SYSX
+        LSUIElement: true
+        NSSystemExtensionUsageDescription: StyleCam camera extension.
+        CMIOExtension:
+          CMIOExtensionMachServiceName: $(TeamIdentifierPrefix)com.matanshavit.StyleCam.Extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.matanshavit.StyleCam.Extension
+        CODE_SIGN_ENTITLEMENTS: Extension/StyleCamExtension.entitlements
+        SKIP_INSTALL: YES
+
+schemes:
+  StyleCam:
+    build:
+      targets:
+        StyleCam: all
+    run:
+      config: Debug
+    archive:
+      config: Release

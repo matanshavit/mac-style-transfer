@@ -1,0 +1,6 @@
+// Shared signing settings. Put your team in Config/Local.xcconfig (see Local.xcconfig.example).
+DEVELOPMENT_TEAM =
+CODE_SIGN_STYLE = Automatic
+STYLECAM_APP_ENTITLEMENTS = App/StyleCam-NoTeam.entitlements
+
+#include? "Local.xcconfig"

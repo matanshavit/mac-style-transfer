@@ -1,0 +1,16 @@
+.DS_Store
+*.xcodeproj/
+build/
+DerivedData/
+.build/
+.swiftpm/
+Config/Local.xcconfig
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# large local data
+data/
+Tools/python/cache/

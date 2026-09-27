@@ -1,0 +1,4 @@
+// Copy to Config/Local.xcconfig (gitignored) and set your Apple Developer team.
+// A paid Apple Developer Program team is required for the camera extension.
+DEVELOPMENT_TEAM = ABCDE12345
+STYLECAM_APP_ENTITLEMENTS = App/StyleCam.entitlements
