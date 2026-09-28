@@ -7,10 +7,6 @@ final class ThumbnailCache {
 
     private var images: [URL: NSImage] = [:]
 
-    func cached(_ url: URL) -> NSImage? {
-        images[url]
-    }
-
     func image(for url: URL) async -> NSImage? {
         if let image = images[url] { return image }
         let decoded = await Task.detached(priority: .userInitiated) { Self.decode(url) }.value

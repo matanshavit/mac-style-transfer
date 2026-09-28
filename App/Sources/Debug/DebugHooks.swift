@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 /// `-StyleCamVideoFile <file.y4m>` plays a video instead of the camera, `-StyleCamStyle <id>`, `-StyleCamShowStats YES`,
 /// `-StyleCamWindowSize <W>x<H>`, `-StyleCamCameraAccess notDetermined|denied` pretends the camera permission is in
 /// that state (and never opens the camera), and `-StyleCamSnapshot <file.png> [-StyleCamSnapshotDelay <seconds>]` writes
-/// the window and the latest output frame, then quits. Any of them keeps the saved settings untouched.
+/// the window, the latest output frame and the main menu, then quits. Any of them keeps the saved settings untouched.
 enum DebugHooks {
     private static var arguments: [String: Any] {
         UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
@@ -72,7 +72,8 @@ final class DebugSnapshot {
         model.addDebugOutput(recorder)
         Task {
             try? await Task.sleep(for: .seconds(DebugHooks.snapshotDelay))
-            let frameURL = url.deletingLastPathComponent().appending(path: url.deletingPathExtension().lastPathComponent + "-frame.png")
+            let base = url.deletingPathExtension().lastPathComponent
+            let frameURL = url.deletingLastPathComponent().appending(path: base + "-frame.png")
             do {
                 if let frame = try recorder.write(to: frameURL) {
                     shared.previewFrame = NSImage(cgImage: frame, size: .zero)
@@ -81,6 +82,7 @@ final class DebugSnapshot {
                     FileHandle.standardError.write(Data("no frame was output\n".utf8))
                 }
                 try writeWindow(to: url)
+                try writeMainMenu(to: url.deletingLastPathComponent().appending(path: base + "-menu.txt"))
             } catch {
                 FileHandle.standardError.write(Data("snapshot failed: \(error)\n".utf8))
             }
@@ -97,6 +99,25 @@ final class DebugSnapshot {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         guard let data = bitmap.representation(using: .png, properties: [:]) else { throw SnapshotError("PNG encoding failed") }
         try data.write(to: url)
+    }
+
+    private static func writeMainMenu(to url: URL) throws {
+        func lines(_ menu: NSMenu, depth: Int) -> [String] {
+            menu.delegate?.menuNeedsUpdate?(menu)
+            menu.update()
+            return menu.items.flatMap { item -> [String] in
+                var line = String(repeating: "  ", count: depth) + (item.isSeparatorItem ? "---" : item.title)
+                if !item.keyEquivalent.isEmpty {
+                    let flags = item.keyEquivalentModifierMask
+                    line += "  " + [(NSEvent.ModifierFlags.control, "⌃"), (.option, "⌥"), (.shift, "⇧"), (.command, "⌘")]
+                        .filter { flags.contains($0.0) }.map(\.1).joined() + item.keyEquivalent.uppercased()
+                }
+                if item.state == .on { line += "  [on]" }
+                if !item.isEnabled, !item.isSeparatorItem { line += "  (disabled)" }
+                return [line] + (item.submenu.map { lines($0, depth: depth + 1) } ?? [])
+            }
+        }
+        try (NSApp.mainMenu.map { lines($0, depth: 0) } ?? []).joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 }
 

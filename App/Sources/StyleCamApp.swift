@@ -38,4 +38,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let clients = AppModel.shared.virtualCamera.sourceClientCount ?? 0
+        guard clients > 0 else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "StyleCam is in use by \(clients) \(clients == 1 ? "app" : "apps")"
+        alert.informativeText = "If you quit, \(clients == 1 ? "that app shows" : "those apps show") a placeholder instead of your video."
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
 }

@@ -56,9 +56,12 @@ private struct PreviewStatus: View {
         } else {
             switch model.captureState {
             case .failed(let message):
-                StatusMessage(symbol: "video.slash", title: "The camera stopped", message: message) {
+                StatusMessage(symbol: "video.slash", title: model.captureFailureTitle, message: message) {
                     Button("Try Again") { model.retryCapture() }
                 }
+            case .interrupted:
+                StatusMessage(symbol: "pause.circle", title: "Camera paused",
+                              message: "macOS paused the camera. StyleCam continues when it is available again.")
             case .starting:
                 ProgressView().controlSize(.large)
             case .stopped, .running:

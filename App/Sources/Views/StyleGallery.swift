@@ -19,11 +19,11 @@ struct StyleGallery: View {
                         model.select(Preferences.originalStyleID)
                     }
                     .id(Preferences.originalStyleID)
+                    AddStyleTile(model: model)
                     ForEach(Array(model.styles.enumerated()), id: \.element.id) { index, style in
                         StyleTile(model: model, style: style, shortcut: index < 9 ? "\(index + 1)" : nil)
                             .id(style.id)
                     }
-                    AddStyleTile(model: model)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
@@ -131,6 +131,8 @@ private struct AddStyleForm: View {
     let model: AppModel
     @Binding var isPresented: Bool
     @State private var link = ""
+    @State private var failure: String?
+    @State private var download: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -150,9 +152,21 @@ private struct AddStyleForm: View {
             HStack {
                 TextField("https://example.com/painting.jpg", text: $link)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(download != nil)
                     .onSubmit(add)
-                Button("Add", action: add)
-                    .disabled(link.trimmingCharacters(in: .whitespaces).isEmpty || model.isImporting)
+                if download != nil {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel", action: cancel)
+                } else {
+                    Button("Add", action: add)
+                        .disabled(link.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            if let failure {
+                Text(failure)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Text("You can also drop an image anywhere on the window.")
                 .font(.caption)
@@ -160,15 +174,29 @@ private struct AddStyleForm: View {
         }
         .padding(16)
         .frame(width: 340)
+        .onDisappear(perform: cancel)
     }
 
     private func add() {
+        guard download == nil, !link.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         let text = link
-        Task {
-            guard await model.addStyle(fromLink: text) else { return }
-            link = ""
-            isPresented = false
+        failure = nil
+        download = Task {
+            let failure = await model.addStyle(fromLink: text)
+            guard !Task.isCancelled else { return }
+            download = nil
+            if let failure {
+                self.failure = failure
+            } else {
+                link = ""
+                isPresented = false
+            }
         }
+    }
+
+    private func cancel() {
+        download?.cancel()
+        download = nil
     }
 }
 
@@ -210,7 +238,7 @@ private struct GalleryTile<Artwork: View>: View {
                         .foregroundStyle(isSelected ? .primary : .secondary)
                     Text(subtitle.isEmpty ? " " : subtitle)
                         .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
                 .lineLimit(1)
                 .frame(width: tileSize.width, alignment: .leading)

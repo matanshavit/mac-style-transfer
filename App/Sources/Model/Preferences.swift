@@ -17,6 +17,7 @@ struct Preferences: Equatable {
     var cameraID: String?
     var mirrorPreview = true
     var showStats = false
+    var showsControls = true
 
     var isStylized: Bool { styleID != Self.originalStyleID }
 }
@@ -34,6 +35,7 @@ extension Preferences {
         static let camera = "cameraID"
         static let mirrorPreview = "mirrorPreview"
         static let showStats = "showStats"
+        static let showsControls = "showsControls"
     }
 
     init(defaults: UserDefaults) {
@@ -49,6 +51,7 @@ extension Preferences {
         cameraID = defaults.string(forKey: Key.camera)
         mirrorPreview = defaults.object(forKey: Key.mirrorPreview) as? Bool ?? mirrorPreview
         showStats = defaults.object(forKey: Key.showStats) as? Bool ?? showStats
+        showsControls = defaults.object(forKey: Key.showsControls) as? Bool ?? showsControls
     }
 
     func save(to defaults: UserDefaults) {
@@ -63,5 +66,6 @@ extension Preferences {
         defaults.set(cameraID, forKey: Key.camera)
         defaults.set(mirrorPreview, forKey: Key.mirrorPreview)
         defaults.set(showStats, forKey: Key.showStats)
+        defaults.set(showsControls, forKey: Key.showsControls)
     }
 }

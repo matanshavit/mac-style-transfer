@@ -35,6 +35,12 @@ public enum CameraError: Error, CustomStringConvertible {
     }
 }
 
+public enum CameraSessionEvent: Sendable {
+    case runtimeError((any Error)?)
+    case interrupted
+    case interruptionEnded
+}
+
 /// Captures 1280x720 BGRA at 30 fps from a real camera. Devices whose uniqueID is in `excludedDeviceUIDs` are never
 /// listed or opened, so the app's own virtual camera cannot feed itself.
 public final class CameraCapture: NSObject, FrameSource, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
@@ -96,6 +102,23 @@ public final class CameraCapture: NSObject, FrameSource, AVCaptureVideoDataOutpu
                 MainActor.assumeIsolated { onChange(devices) }
             }
         }
+    }
+
+    /// Calls `onEvent` on the main queue when the running session fails, or macOS interrupts it and later resumes it.
+    public func observeSession(_ onEvent: @escaping @MainActor @Sendable (CameraSessionEvent) -> Void) -> [any NSObjectProtocol] {
+        let center = NotificationCenter.default
+        return [
+            center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: .main) { note in
+                let error = note.userInfo?[AVCaptureSessionErrorKey] as? any Error
+                MainActor.assumeIsolated { onEvent(.runtimeError(error)) }
+            },
+            center.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: .main) { _ in
+                MainActor.assumeIsolated { onEvent(.interrupted) }
+            },
+            center.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: .main) { _ in
+                MainActor.assumeIsolated { onEvent(.interruptionEnded) }
+            },
+        ]
     }
 
     /// Configures the session synchronously so errors surface here; the session starts running asynchronously.

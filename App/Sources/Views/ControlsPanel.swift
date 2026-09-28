@@ -6,18 +6,24 @@ struct ControlsPanel: View {
 
     var body: some View {
         Form {
+            VirtualCameraSection(model: model)
+
             Section("Style") {
-                PercentSlider(title: "Strength", value: $model.preferences.strength)
-                PercentSlider(title: "Smoothing", value: $model.preferences.smoothing)
-                PercentSlider(title: "Detail", value: $model.preferences.detail)
-                Toggle("Preserve colors", isOn: $model.preferences.preserveColors)
-                Picker("Apply to", selection: $model.preferences.mask) {
-                    Text("Everything").tag(MaskMode.everything)
-                    Text("Background").tag(MaskMode.backgroundOnly)
-                    Text("Me").tag(MaskMode.personOnly)
+                if model.preferences.isStylized {
+                    PercentSlider(title: "Strength", value: $model.preferences.strength)
+                    PercentSlider(title: "Smoothing", value: $model.preferences.smoothing)
+                    PercentSlider(title: "Detail", value: $model.preferences.detail)
+                    Toggle("Preserve colors", isOn: $model.preferences.preserveColors)
+                    Picker("Apply to", selection: $model.preferences.mask) {
+                        Text("Everything").tag(MaskMode.everything)
+                        Text("Background").tag(MaskMode.backgroundOnly)
+                        Text("Me").tag(MaskMode.personOnly)
+                    }
+                } else {
+                    Text("Pick a style to adjust it.")
+                        .foregroundStyle(.secondary)
                 }
             }
-            .disabled(!model.preferences.isStylized)
 
             Section {
                 Picker("Quality", selection: $model.preferences.quality) {
@@ -49,11 +55,7 @@ struct ControlsPanel: View {
                         }
                     }
                 }
-                Toggle("Mirror preview", isOn: $model.preferences.mirrorPreview)
-                Toggle("Show stats", isOn: $model.preferences.showStats)
             }
-
-            VirtualCameraSection(model: model)
         }
         .formStyle(.grouped)
     }

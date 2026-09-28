@@ -3,7 +3,6 @@ import UniformTypeIdentifiers
 
 struct MainView: View {
     @Bindable var model: AppModel
-    @State private var showsControls = true
     @State private var isDropTargeted = false
 
     var body: some View {
@@ -16,7 +15,7 @@ struct MainView: View {
                 StyleGallery(model: model)
             }
             .frame(minWidth: 520)
-            if showsControls {
+            if model.preferences.showsControls {
                 Divider()
                 ControlsPanel(model: model)
                     .frame(width: 300)
@@ -24,6 +23,7 @@ struct MainView: View {
             }
         }
         .frame(minHeight: 460)
+        .animation(.easeInOut(duration: 0.2), value: model.preferences.showsControls)
         .background(WindowVisibilityReader { model.mainWindowVisibilityChanged($0) })
         .toolbar {
             ToolbarItemGroup {
@@ -42,11 +42,11 @@ struct MainView: View {
             }
             ToolbarItem {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { showsControls.toggle() }
+                    model.preferences.showsControls.toggle()
                 } label: {
                     Label("Controls", systemImage: "sidebar.trailing")
                 }
-                .help(showsControls ? "Hide controls" : "Show controls")
+                .help(model.preferences.showsControls ? "Hide controls" : "Show controls")
             }
         }
         .navigationTitle("StyleCam")
@@ -58,11 +58,14 @@ struct MainView: View {
         .fileImporter(isPresented: $model.isShowingFileImporter, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls): Task { await model.addStyles(fromFiles: urls) }
-            case .failure(let error): model.importError = error.localizedDescription
+            case .failure(let error): model.alert = .addFailed(error.localizedDescription)
             }
         }
-        .alert(model.importError ?? "", isPresented: Binding(get: { model.importError != nil }, set: { if !$0 { model.importError = nil } })) {
+        .alert(model.alert?.title ?? "", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } }),
+               presenting: model.alert) { _ in
             Button("OK", role: .cancel) {}
+        } message: { alert in
+            Text(alert.message)
         }
     }
 
@@ -110,7 +113,9 @@ enum StyleDrop {
             } else if provider.canLoadObject(ofClass: URL.self) {
                 _ = provider.loadObject(ofClass: URL.self) { url, _ in
                     guard let url else { return }
-                    Task { @MainActor in await model.addStyle(fromLink: url.absoluteString) }
+                    Task { @MainActor in
+                        if let failure = await model.addStyle(fromLink: url.absoluteString) { model.alert = .addFailed(failure) }
+                    }
                 }
             } else {
                 continue

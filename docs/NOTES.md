@@ -52,7 +52,11 @@ Camera extension: sink stream -> source stream -> Zoom / Meet / FaceTime
 - One main window, a menu bar item and a Settings window. Closing the window keeps the app running, so the virtual camera keeps working. The Dock icon or the menu bar brings the window back.
 - **Camera lifecycle.** The camera and the pipeline run only while the main window is visible (not closed, minimized, fully covered, or behind a locked screen) or the virtual camera has at least one client. Otherwise they stop after 2 s and the camera light goes off. The client count is the extension's `scsc` device property, which `VirtualCameraOutput` reads once a second while connected. The app stays connected to the sink all the time to read it; frames only flow while the pipeline runs.
 - The app never asks for camera access by itself. The preview shows a button for it.
-- The controls are a plain side column, not a SwiftUI inspector. The inspector's glass background does not render in snapshots, so it could not be checked.
+- If the camera sends no frame within 10 s, fails at runtime, or is interrupted by macOS, the preview says so instead of spinning.
+- **Login launch.** macOS marks it with `keyAELaunchedAsLogInItem`, and SwiftUI then does not open the window, so the camera stays off. Checked with a simulated launch event (`NSWorkspace.OpenConfiguration.appleEvent`), not a real login.
+- Quitting while another app uses the virtual camera asks first.
+- The controls are a plain side column, not a SwiftUI inspector. The inspector's glass background does not render in snapshots, so it could not be checked. The virtual camera section is at the top, because it is what makes the app useful in calls.
+- Image links are fetched over https only (App Transport Security blocks http, so http links are upgraded). Limits: 50 MB, 30 s, and `text/`, `video/` or `audio/` responses are rejected before download.
 - Settings are in UserDefaults. Custom styles are in `~/Library/Application Support/StyleCam/Styles`.
 - Styles can be switched from Shortcuts and Spotlight (App Intents: Set StyleCam Style, Toggle StyleCam Style).
 
@@ -63,7 +67,7 @@ Debug builds only. Launch arguments:
 - `-StyleCamVideoFile <file.y4m>` plays the file at 30 fps, looping, instead of the camera. No camera permission.
 - `-StyleCamStyle <id>`, `-StyleCamShowStats YES`, `-StyleCamWindowSize 900x600`.
 - `-StyleCamCameraAccess notDetermined|denied` shows that permission state and never opens the camera.
-- `-StyleCamSnapshot <file.png> [-StyleCamSnapshotDelay 5]` writes the window to `<file>.png` and the latest output frame to `<file>-frame.png`, then quits. `cacheDisplay` cannot draw the video layer, so the latest frame is drawn in its place. It also cannot draw the glass toolbar (a blank capsule) or menus.
+- `-StyleCamSnapshot <file.png> [-StyleCamSnapshotDelay 5]` writes the window to `<file>.png`, the latest output frame to `<file>-frame.png` and the main menu (titles, shortcuts, checkmarks) to `<file>-menu.txt`, then quits. `cacheDisplay` cannot draw the video layer, so the latest frame is drawn in its place. It also cannot draw the glass toolbar (a blank capsule) or menus.
 - With any of them, saved settings and the window frame are left alone, and the window counts as visible while it is open, even with the screen locked.
 
 ```sh

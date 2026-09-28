@@ -18,7 +18,17 @@ final class AppModel {
         case stopped
         case starting
         case running
+        case interrupted
         case failed(String)
+    }
+
+    struct AlertMessage: Equatable {
+        let title: String
+        let message: String
+
+        static func addFailed(_ message: String) -> AlertMessage {
+            AlertMessage(title: "Couldn’t Add Style", message: message)
+        }
     }
 
     static let catalogDirectory = Bundle.main.resourceURL!.appending(path: "Styles", directoryHint: .isDirectory)
@@ -26,6 +36,8 @@ final class AppModel {
         .appending(path: "StyleCam/Styles", directoryHint: .isDirectory)
     /// Keeps the camera on briefly after it stops being needed, so hiding and showing the window does not restart it.
     static let stopDelay = Duration.seconds(2)
+    static let startTimeout = Duration.seconds(10)
+    nonisolated static let maxDownloadBytes = 50_000_000
 
     let source: Source
     let preview = PreviewOutput()
@@ -44,8 +56,8 @@ final class AppModel {
     private(set) var stats: PipelineStats?
     private(set) var virtualCamera: VirtualCameraOutput.State
     private(set) var setupError: String?
-    private(set) var isImporting = false
-    var importError: String?
+    private var importCount = 0
+    var alert: AlertMessage?
     var isShowingFileImporter = false
 
     @ObservationIgnored private let defaults: UserDefaults?
@@ -61,6 +73,7 @@ final class AppModel {
     @ObservationIgnored private var loadTask: Task<Void, Never>?
     @ObservationIgnored private var styleTask: Task<Void, Never>?
     @ObservationIgnored private var stopTask: Task<Void, Never>?
+    @ObservationIgnored private var startTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private var observers: [any NSObjectProtocol] = []
     @ObservationIgnored private var isMainWindowVisible = false
     @ObservationIgnored private var isPreviewAttached = false
@@ -84,7 +97,7 @@ final class AppModel {
             pipeline = try StylePipeline(modelStore: ModelStore(locations: [.bundle(.main)]))
         } catch {
             pipeline = nil
-            setupError = "StyleCam cannot use this Mac's GPU: \(error)"
+            setupError = "StyleCam cannot use this Mac’s GPU. " + Self.describe(error)
         }
         applyPipelineSettings()
         startObserving()
@@ -95,6 +108,10 @@ final class AppModel {
 
     var selectedStyle: StyleInfo? {
         styles.first { $0.id == preferences.styleID }
+    }
+
+    var isImporting: Bool {
+        importCount > 0
     }
 
     var selectedTitle: String {
@@ -136,7 +153,7 @@ final class AppModel {
     }
 
     func addStyles(fromFiles urls: [URL]) async {
-        await importStyle { library in
+        let failure = await importStyle { library in
             var added: StyleInfo?
             for url in urls {
                 let accessing = url.startAccessingSecurityScopedResource()
@@ -145,34 +162,22 @@ final class AppModel {
             }
             return added
         }
+        if let failure { alert = .addFailed(failure) }
     }
 
     func addStyle(imageData data: Data, title: String) async {
-        await importStyle { library in
-            let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-            try data.write(to: file)
-            defer { try? FileManager.default.removeItem(at: file) }
-            return try await library.addCustomStyle(imageAt: file, title: title)
+        if let failure = await importStyle({ library in try await Self.add(data, title: title, to: library) }) {
+            alert = .addFailed(failure)
         }
     }
 
-    /// Returns false when the text is not a web address.
-    @discardableResult
-    func addStyle(fromLink text: String) async -> Bool {
-        guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              ["http", "https"].contains(url.scheme?.lowercased()) else {
-            importError = "Enter a web address that starts with http:// or https://."
-            return false
+    /// Returns why the style could not be added, or nil once it is added and selected. Plain http links are fetched
+    /// over https, because App Transport Security blocks http.
+    func addStyle(fromLink text: String) async -> String? {
+        guard let url = Self.webURL(text) else { return "Enter a link that starts with https://." }
+        return await importStyle { library in
+            try await Self.add(Self.download(url), title: Self.title(for: url), to: library)
         }
-        await importStyle { library in
-            let (file, response) = try await URLSession.shared.download(from: url)
-            defer { try? FileManager.default.removeItem(at: file) }
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                throw ImportError.http(http.statusCode)
-            }
-            return try await library.addCustomStyle(imageAt: file, title: Self.title(for: url))
-        }
-        return true
     }
 
     func removeStyle(_ style: StyleInfo) async {
@@ -185,35 +190,85 @@ final class AppModel {
             if preferences.lastStyleID == style.id { preferences.lastStyleID = nil }
             StyleCamShortcuts.updateAppShortcutParameters()
         } catch {
-            importError = "Could not remove \(style.title): \(error)"
+            alert = AlertMessage(title: "Couldn’t Remove Style", message: Self.describe(error))
         }
     }
 
-    private enum ImportError: Error, CustomStringConvertible {
+    private enum ImportError: Error {
         case http(Int)
+        case notImage(webPage: Bool)
+        case tooLarge
+        case libraryUnavailable
 
-        var description: String {
+        var message: String {
             switch self {
-            case .http(let status): "the server answered \(status) (\(HTTPURLResponse.localizedString(forStatusCode: status)))"
+            case .http(let status):
+                "The server answered \(status) (\(HTTPURLResponse.localizedString(forStatusCode: status)))."
+            case .notImage(webPage: true): "That link opens a web page, not an image. Use a direct link to the image file."
+            case .notImage(webPage: false): "That link is not an image."
+            case .tooLarge: "That image is larger than \(maxDownloadBytes / 1_000_000) MB."
+            case .libraryUnavailable: "StyleCam could not load its styles."
             }
         }
     }
 
-    private func importStyle(_ add: (StyleLibrary) async throws -> StyleInfo?) async {
-        guard let library else { return }
-        isImporting = true
-        defer { isImporting = false }
-        var added: StyleInfo?
+    private nonisolated static let downloadSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        return URLSession(configuration: configuration)
+    }()
+
+    /// Returns why the style could not be added, or nil once it is added and selected.
+    private func importStyle(_ add: (StyleLibrary) async throws -> StyleInfo?) async -> String? {
+        importCount += 1
+        defer { importCount -= 1 }
+        await loadTask?.value
+        var failure: String?
         do {
-            added = try await add(library)
-        } catch StyleLibraryError.unreadableImage {
-            importError = "That file is not an image StyleCam can read."
+            guard let library else { throw ImportError.libraryUnavailable }
+            let added = try await add(library)
+            styles = await library.styles
+            if let added { select(added.id) }
         } catch {
-            importError = "Could not add the style: \(error)"
+            failure = Self.describe(error)
+            if let library { styles = await library.styles }
         }
-        styles = await library.styles
-        if let added { select(added.id) }
         StyleCamShortcuts.updateAppShortcutParameters()
+        return failure
+    }
+
+    private nonisolated static func add(_ data: Data, title: String, to library: StyleLibrary) async throws -> StyleInfo {
+        let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try data.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        return try await library.addCustomStyle(imageAt: file, title: title)
+    }
+
+    private nonisolated static func download(_ url: URL) async throws -> Data {
+        let (bytes, response) = try await downloadSession.bytes(from: url)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw ImportError.http(http.statusCode)
+        }
+        if let type = response.mimeType, ["text/", "video/", "audio/"].contains(where: type.hasPrefix) {
+            throw ImportError.notImage(webPage: type.hasPrefix("text/"))
+        }
+        guard response.expectedContentLength <= maxDownloadBytes else { throw ImportError.tooLarge }
+        var data = Data()
+        data.reserveCapacity(Int(max(0, response.expectedContentLength)))
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count > maxDownloadBytes { throw ImportError.tooLarge }
+        }
+        return data
+    }
+
+    private static func webURL(_ text: String) -> URL? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: text.contains("://") ? text : "https://" + text),
+              ["http", "https"].contains(components.scheme?.lowercased()), components.host?.isEmpty == false else { return nil }
+        components.scheme = "https"
+        return components.url
     }
 
     private static func title(for url: URL) -> String {
@@ -245,6 +300,10 @@ final class AppModel {
         updateCapture()
     }
 
+    var captureFailureTitle: String {
+        source == .camera ? "Camera unavailable" : "Video unavailable"
+    }
+
     private static var currentCameraAuthorization: AVAuthorizationStatus {
         #if DEBUG
         if let simulated = DebugHooks.cameraAccess { return simulated }
@@ -273,7 +332,7 @@ final class AppModel {
     private func startCapture() {
         guard let pipeline else { return }
         switch captureState {
-        case .starting, .running: return
+        case .starting, .running, .interrupted: return
         case .stopped, .failed: break
         }
         let frameSource: any FrameSource
@@ -291,29 +350,64 @@ final class AppModel {
                 videoSource = video
                 frameSource = video
             } catch {
-                captureState = .failed("Cannot read \(url.lastPathComponent): \(error)")
+                captureState = .failed("StyleCam cannot play \(url.lastPathComponent). " + Self.describe(error))
                 return
             }
         }
-        awaitingFirstFrame.withLock { $0 = true }
         do {
             if source == .camera { try camera.selectDevice(id: preferences.cameraID) }
             try pipeline.start(source: frameSource)
-            captureState = .starting
+            waitForFirstFrame()
         } catch {
-            captureState = .failed(Self.describe(error))
+            failCapture(Self.describe(error))
         }
     }
 
     private func stopCapture() {
+        startTimeoutTask?.cancel()
         pipeline?.stop()
         preview.clear()
         captureState = .stopped
         stats = nil
     }
 
+    private func failCapture(_ message: String) {
+        startTimeoutTask?.cancel()
+        pipeline?.stop()
+        preview.clear()
+        captureState = .failed(message)
+    }
+
+    private func waitForFirstFrame() {
+        awaitingFirstFrame.withLock { $0 = true }
+        captureState = .starting
+        startTimeoutTask?.cancel()
+        startTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.startTimeout)
+            guard !Task.isCancelled, let self, captureState == .starting else { return }
+            failCapture(source == .camera ? "The camera did not start." : "The video did not start.")
+        }
+    }
+
     private func firstFrameArrived() {
-        if captureState == .starting { captureState = .running }
+        guard captureState == .starting else { return }
+        startTimeoutTask?.cancel()
+        captureState = .running
+    }
+
+    private func cameraSessionChanged(_ event: CameraSessionEvent) {
+        switch (event, captureState) {
+        case (.runtimeError(let error), .starting), (.runtimeError(let error), .running), (.runtimeError(let error), .interrupted):
+            failCapture(error.map(Self.describe) ?? "The camera stopped working.")
+        case (.interrupted, .starting), (.interrupted, .running):
+            startTimeoutTask?.cancel()
+            preview.clear()
+            captureState = .interrupted
+        case (.interruptionEnded, .interrupted):
+            waitForFirstFrame()
+        default:
+            break
+        }
     }
 
     private func updatePreviewAttachment() {
@@ -332,7 +426,7 @@ final class AppModel {
         switch captureState {
         case .failed:
             updateCapture()
-        case .starting, .running:
+        case .starting, .running, .interrupted:
             guard let active = camera.activeDevice, !devices.contains(where: { $0.id == active.id }) else { return }
             selectCamera()
         case .stopped:
@@ -344,16 +438,34 @@ final class AppModel {
         do {
             try camera.selectDevice(id: preferences.cameraID)
         } catch {
-            pipeline?.stop()
-            captureState = .failed(Self.describe(error))
+            failCapture(Self.describe(error))
         }
     }
 
+    /// A sentence for the user. StyleKit errors describe themselves in lowercase for logs.
     private static func describe(_ error: any Error) -> String {
         switch error {
-        case CameraError.noDevice: "No camera is connected."
-        case CameraError.notAuthorized: "StyleCam is not allowed to use the camera."
-        default: String(describing: error)
+        case CameraError.noDevice: return "No camera is connected."
+        case CameraError.notAuthorized: return "StyleCam is not allowed to use the camera."
+        case CameraError.cannotAddInput(let name): return "StyleCam cannot use \(name)."
+        case StyleLibraryError.unreadableImage: return "That is not an image StyleCam can read."
+        case let error as ImportError: return error.message
+        case let error as URLError: return describe(error)
+        default: break
+        }
+        if type(of: error) is NSObject.Type { return error.localizedDescription }
+        let text = String(describing: error)
+        return text.prefix(1).uppercased() + text.dropFirst() + "."
+    }
+
+    private static func describe(_ error: URLError) -> String {
+        let host = error.failingURL?.host() ?? "the server"
+        return switch error.code {
+        case .notConnectedToInternet, .networkConnectionLost: "Your Mac is not connected to the internet."
+        case .timedOut: "The download took too long."
+        case .cannotFindHost, .dnsLookupFailed: "StyleCam cannot find \(host). Check the link."
+        case .secureConnectionFailed, .appTransportSecurityRequiresSecureConnection: "\(host) does not support secure (https) links."
+        default: error.localizedDescription
         }
     }
 
@@ -385,6 +497,7 @@ final class AppModel {
         if source == .camera {
             cameras = camera.devices()
             observers = camera.observeDevices { [weak self] devices in self?.camerasChanged(devices) }
+                + camera.observeSession { [weak self] event in self?.cameraSessionChanged(event) }
         }
         observers += [NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshCameraAuthorization() }
@@ -414,7 +527,7 @@ final class AppModel {
                 resolveStyle()
             }
         } catch {
-            setupError = "Could not load the styles: \(error)"
+            setupError = "StyleCam could not load its styles. " + Self.describe(error)
         }
         isLibraryLoaded = true
         StyleCamShortcuts.updateAppShortcutParameters()
@@ -435,8 +548,12 @@ final class AppModel {
         } else {
             applyPipelineSettings()
         }
-        if preferences.cameraID != old.cameraID, source == .camera, captureState != .stopped {
-            selectCamera()
+        if preferences.cameraID != old.cameraID, source == .camera {
+            switch captureState {
+            case .failed: retryCapture()
+            case .starting, .running, .interrupted: selectCamera()
+            case .stopped: break
+            }
         }
     }
 
