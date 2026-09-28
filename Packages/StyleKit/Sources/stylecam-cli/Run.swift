@@ -32,10 +32,14 @@ func runPipeline(_ arguments: Arguments) async throws {
     settings.segmentationQuality = try arguments.choice("segmentation", as: SegmentationQuality.self) ?? settings.segmentationQuality
     let realtime = arguments.flag("realtime")
     let codec: AVVideoCodecType = arguments.string("codec") == "hevc" ? .hevc : .h264
+    let loops = arguments.flag("loop")
+    let maxFrames = try arguments.int("frames")
+    if loops && maxFrames == nil { throw UsageError(description: "--loop needs --frames") }
 
     let source = try Y4MFileSource(url: try arguments.url("input"), frameRate: Double(try arguments.int("fps") ?? 30),
-                                   pacing: realtime ? .realtime : .asFastAsPossible, maxFrames: try arguments.int("frames"))
+                                   pacing: realtime ? .realtime : .asFastAsPossible, maxFrames: maxFrames, loops: loops)
     let pipeline = try StylePipeline(modelStore: store, settings: settings, backpressure: realtime ? .dropFrames : .waitForSlot)
+    if arguments.flag("log-adaptive") { logAdaptation(of: pipeline) }
     try await pipeline.prepare()
 
     let expected = source.outputFrameCount ?? 0
@@ -93,6 +97,17 @@ func runPipeline(_ arguments: Arguments) async throws {
         + "over \(format(report.movingFraction * 100, 1))% of pixels")
     print("wrote   \(outputURL.path) (\(writer.framesWritten) frames)")
     for still in report.stills.sorted(by: { $0.path < $1.path }) { print("still   \(still.path)") }
+}
+
+private func logAdaptation(of pipeline: StylePipeline) {
+    let start = now()
+    let stamp: @Sendable () -> String = { "[\(format(now() - start, 2).leftPadded(7)) s]" }
+    pipeline.onAdaptiveEvent = { event in print("\(stamp()) \(event)") }
+    pipeline.onStats = { stats in
+        print("\(stamp()) \(stats.engine ?? "passthrough") | \(format(stats.outputFPS, 1)) fps | inference p50 "
+            + "\(format(stats.inferenceMillisecondsP50, 1)) ms | latency p50 \(format(stats.latencyMillisecondsP50, 1)) ms | "
+            + "dropped \(stats.droppedFrames) (\(stats.totalDroppedFrames) total)" + (stats.lastError.map { " | error \($0)" } ?? ""))
+    }
 }
 
 private extension String {

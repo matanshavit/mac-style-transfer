@@ -25,6 +25,8 @@ public struct PipelineStats: Sendable {
     public var totalDroppedFrames: Int
     /// For example "960x540 gpu", or nil while bypassing.
     public var engine: String?
+    /// What an adaptive quality runs or is switching to, and why. Nil for a fixed quality.
+    public var adaptive: AdaptiveDecision?
     public var lastError: String?
 }
 
@@ -60,14 +62,15 @@ final class StatsCollector: Sendable {
         }
     }
 
-    func snapshot(engine: String?, lastError: String?) -> PipelineStats {
+    func snapshot(engine: String?, adaptive: AdaptiveDecision?, lastError: String?) -> PipelineStats {
         window.withLock { window in
             let now = HostClock.now()
             let seconds = max((now - window.start).seconds, 1e-3)
             let stats = PipelineStats(
                 captureFPS: Double(window.captured) / seconds, outputFPS: Double(window.output) / seconds,
                 inferenceMillisecondsP50: median(window.inference), latencyMillisecondsP50: median(window.latency),
-                droppedFrames: window.dropped, totalDroppedFrames: window.totalDropped, engine: engine, lastError: lastError)
+                droppedFrames: window.dropped, totalDroppedFrames: window.totalDropped, engine: engine, adaptive: adaptive,
+                lastError: lastError)
             window = Window(start: now, totalDropped: window.totalDropped)
             return stats
         }

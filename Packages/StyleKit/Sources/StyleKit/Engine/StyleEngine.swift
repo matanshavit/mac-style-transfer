@@ -35,6 +35,7 @@ public final class StyleEngine: @unchecked Sendable {
     public let mode: EngineMode
 
     public var maxConcurrentFrames: Int { instances.count }
+    var quality: Quality { Quality(size: size, mode: mode) }
 
     private final class Instance: @unchecked Sendable {
         let device: ComputeDevice

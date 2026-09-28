@@ -116,12 +116,12 @@ final class FrameRenderer {
         history?.valid = false
     }
 
-    /// Scales the camera frame (aspect fill) into the model input and, when given, the style predictor input.
-    func encodeDownscale(camera: CVPixelBuffer, into input: CVPixelBuffer, predictorInput: CVPixelBuffer?,
+    /// Scales the camera frame (aspect fill) into each destination, such as model and style predictor inputs.
+    func encodeDownscale(camera: CVPixelBuffer, into destinations: [CVPixelBuffer],
                          commandBuffer: any MTLCommandBuffer) throws -> [CVMetalTexture] {
         let source = try context.texture(for: camera, format: .bgra8Unorm)
         var owners = [source.owner]
-        for destination in [input, predictorInput].compactMap({ $0 }) {
+        for destination in destinations {
             let target = try context.texture(for: destination, format: .bgra8Unorm)
             owners.append(target.owner)
             var transform = Self.aspectFill(from: camera, toWidth: destination.width, height: destination.height)

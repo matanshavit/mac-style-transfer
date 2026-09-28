@@ -17,6 +17,10 @@ public struct ProcessedFrame: @unchecked Sendable {
 /// Settings can change from any thread and apply from the next admitted frame. Each engine instance works on one frame
 /// at a time and one more frame waits for the next free instance. In `.dropFrames` mode a newer frame replaces the
 /// waiting one, so latency never queues up; in `.waitForSlot` mode the source's thread blocks instead (for offline runs).
+///
+/// An adaptive quality only adapts in `.dropFrames` mode; `.waitForSlot` runs its preferred configuration. At most two
+/// engines stay loaded: the running one and the next one, which is the one being switched to, an adaptive trial, or
+/// the adaptive fallback.
 public final class StylePipeline: @unchecked Sendable {
     public enum Backpressure: Sendable {
         case dropFrames
@@ -35,9 +39,11 @@ public final class StylePipeline: @unchecked Sendable {
         var outputs: [any FrameOutput] = []
         var onFrame: (@Sendable (ProcessedFrame) -> Void)?
         var onStats: (@Sendable (PipelineStats) -> Void)?
+        var onAdaptiveEvent: (@Sendable (AdaptiveEvent) -> Void)?
         var statsContinuations: [UUID: AsyncStream<PipelineStats>.Continuation] = [:]
         var source: (any FrameSource)?
         var engine: String?
+        var adaptive: AdaptiveDecision?
         var lastError: String?
     }
 
@@ -54,11 +60,15 @@ public final class StylePipeline: @unchecked Sendable {
         let admitted = HostClock.now()
         var style: StyleVector?
         var usesEngine = false
+        var quality: Quality?
         var dualEngine = false
         var resetHistory = false
         var input: CVPixelBuffer?
         var predictorInput: CVPixelBuffer?
         var needsContentVector = false
+        var trialEngine: StyleEngine?
+        /// The trial engine's input when its size differs from the running engine's.
+        var trialInput: CVPixelBuffer?
         /// Held until the post pass completes so the engine's pool cannot reuse it while the GPU reads it.
         var stylized: CVPixelBuffer?
         var retained: [CVMetalTexture] = []
@@ -95,10 +105,17 @@ public final class StylePipeline: @unchecked Sendable {
     private let statsTimer: any DispatchSourceTimer
     private let releaseTimer: any DispatchSourceTimer
 
+    private let adaptive: AdaptiveController
+    private var conditionsMonitor: SystemConditionsMonitor?
     private var engines: [Quality: StyleEngine] = [:]
+    private var keptEngines: [Quality] = []
     private var loadingEngines: Set<Quality> = []
     private var failedEngines: Set<Quality> = []
     private var activeEngine: StyleEngine?
+    /// The engine that ran last. It stays loaded while frames pass through.
+    private var currentQuality: Quality?
+    private var wantedQuality: Quality?
+    private var trialBusy = false
     private var engineFrames = 0
     private var waiting: [Job] = []
     private var segmentation: SegmentationQuality?
@@ -120,6 +137,7 @@ public final class StylePipeline: @unchecked Sendable {
         context = try MetalContext()
         renderer = try FrameRenderer(context: context, outputWidth: outputWidth, outputHeight: outputHeight)
         segmenter = PersonSegmenter(device: context.device)
+        adaptive = AdaptiveController(availableSizes: modelStore.availableTransformerSizes(), conditions: .current())
         shared = Mutex(Shared(settings: settings))
         statsTimer = DispatchSource.makeTimerSource(queue: outputQueue)
         releaseTimer = DispatchSource.makeTimerSource(flags: .strict, queue: outputQueue)
@@ -128,6 +146,8 @@ public final class StylePipeline: @unchecked Sendable {
         statsTimer.resume()
         releaseTimer.setEventHandler { [weak self] in self?.deliverHeld() }
         releaseTimer.resume()
+        adaptive.onEvent = { [weak self] event in self?.adaptiveEvent(event) }
+        conditionsMonitor = SystemConditionsMonitor(queue: queue) { [weak self] in self?.conditionsChanged() }
     }
 
     deinit {
@@ -158,6 +178,12 @@ public final class StylePipeline: @unchecked Sendable {
         set { shared.withLock { $0.onFrame = newValue } }
     }
 
+    /// Called on the pipeline queue when an adaptive quality decides, starts a trial or switches engines. Keep it short.
+    public var onAdaptiveEvent: (@Sendable (AdaptiveEvent) -> Void)? {
+        get { shared.withLock { $0.onAdaptiveEvent } }
+        set { shared.withLock { $0.onAdaptiveEvent = newValue } }
+    }
+
     /// Called about once per second.
     public var onStats: (@Sendable (PipelineStats) -> Void)? {
         get { shared.withLock { $0.onStats } }
@@ -177,13 +203,17 @@ public final class StylePipeline: @unchecked Sendable {
     /// Loads the engine for the current quality and the style predictor, so the first frames are stylized.
     /// Without it they are loaded on demand and frames pass through unstylized meanwhile.
     public func prepare() async throws {
-        let quality = settings.quality
+        let quality = await withCheckedContinuation { continuation in
+            queue.async { [self] in continuation.resume(returning: engineQuality(for: settings.quality)) }
+        }
         let engine = try await StyleEngine.load(store: modelStore, size: quality.size, mode: quality.mode)
         let predictor = try await StylePredictor.load(from: modelStore)
         await withCheckedContinuation { continuation in
             queue.async { [self] in
                 engines[quality] = engine
                 failedEngines.remove(quality)
+                wantedQuality = quality
+                manageEngines()
                 self.predictor = .ready(predictor)
                 continuation.resume()
             }
@@ -231,6 +261,7 @@ public final class StylePipeline: @unchecked Sendable {
     // MARK: - Pipeline queue
 
     private func schedule(_ job: Job) {
+        adaptive.recordArrival(job.frame.presentationTime)
         if backpressure == .dropFrames {
             waiting.forEach(drop)
             waiting.removeAll()
@@ -257,8 +288,20 @@ public final class StylePipeline: @unchecked Sendable {
     /// Nil passes the frame through. The active engine keeps running while the wanted one loads.
     private func engine(for settings: PipelineSettings) -> StyleEngine? {
         guard !settings.bypass, settings.style != nil else { return nil }
-        if engines[settings.quality] == nil { loadEngine(settings.quality) }
-        return engines[settings.quality] ?? activeEngine
+        let quality = engineQuality(for: settings.quality)
+        if quality != wantedQuality {
+            wantedQuality = quality
+            manageEngines()
+        }
+        return engines[quality] ?? activeEngine
+    }
+
+    private func engineQuality(for quality: Quality) -> Quality {
+        guard backpressure == .dropFrames, quality.adaptive else {
+            if adaptive.stop() { shared.withLock { $0.adaptive = nil } }
+            return quality.fixed
+        }
+        return adaptive.target(for: quality, current: currentQuality, now: HostClock.now().seconds)
     }
 
     private func start(_ job: Job) {
@@ -274,18 +317,21 @@ public final class StylePipeline: @unchecked Sendable {
 
         engineFrames += 1
         job.usesEngine = true
+        job.quality = engine.quality
         job.dualEngine = engine.mode == .dual
         job.resetHistory = style != lastStyle
         lastStyle = style
         job.style = style
         requestContentVector(for: job)
+        assignTrial(to: job, running: engine)
 
         do {
             let input = try engine.makeInputBuffer()
             job.input = input
             let commandBuffer = try context.makeCommandBuffer()
-            job.retained = try renderer.encodeDownscale(camera: job.frame.pixelBuffer, into: input,
-                                                        predictorInput: job.predictorInput, commandBuffer: commandBuffer)
+            job.retained = try renderer.encodeDownscale(camera: job.frame.pixelBuffer,
+                                                        into: [input, job.predictorInput, job.trialInput].compactMap { $0 },
+                                                        commandBuffer: commandBuffer)
             commandBuffer.addCompletedHandler { [self] buffer in
                 let milliseconds = Self.gpuMilliseconds(buffer)
                 let error = buffer.error
@@ -332,25 +378,30 @@ public final class StylePipeline: @unchecked Sendable {
                 contentPending = false
             }
         }
-        guard error == nil, let input = job.input, var style = job.style else { return fail(job, error) }
-        if job.settings.strength < 1, let contentVector {
-            style = style.blended(withContent: contentVector, strength: max(0, job.settings.strength))
+        guard error == nil, let input = job.input, let requested = job.style else { return fail(job, error) }
+        let style = if job.settings.strength < 1, let contentVector {
+            requested.blended(withContent: contentVector, strength: max(0, job.settings.strength))
+        } else {
+            requested
         }
         job.timings.downscaleMilliseconds = gpuMilliseconds
         if job.settings.mask != .everything {
             segmenter.submit(input, quality: job.settings.segmentationQuality)
         }
         engine.stylize(input, style: style) { [self] result in
-            queue.async { [self] in stylized(job, result: result) }
+            queue.async { [self] in stylized(job, style: style, result: result) }
         }
     }
 
-    private func stylized(_ job: Job, result: Result<StylizedFrame, any Error>) {
+    private func stylized(_ job: Job, style: StyleVector, result: Result<StylizedFrame, any Error>) {
         switch result {
         case .failure(let error):
             fail(job, error)
         case .success(let frame):
             guard let input = job.input else { return fail(job, nil) }
+            let trialEngine = job.trialEngine
+            job.trialEngine = nil
+            defer { if let trialEngine { runTrial(trialEngine, input: job.trialInput ?? input, style: style) } }
             job.stylized = frame.pixelBuffer
             job.timings.inferenceMilliseconds = frame.inferenceMilliseconds
             job.timings.device = frame.device
@@ -398,16 +449,25 @@ public final class StylePipeline: @unchecked Sendable {
     /// The frame's post pass is committed or the frame failed before that.
     private func leftEngine(_ job: Job) {
         if job.usesEngine { engineFrames -= 1 }
+        if job.trialEngine != nil {
+            job.trialEngine = nil
+            trialBusy = false
+        }
         if backpressure == .waitForSlot { admission.leave() }
         startWaiting()
     }
 
+    /// Temporal history carries over between engines of the same size, so switching devices does not reset smoothing.
     private func activate(_ engine: StyleEngine?) {
+        if activeEngine == nil { renderer.resetHistory() }
         activeEngine = engine
         admission.setLimit((engine?.maxConcurrentFrames ?? 1) + 1)
-        renderer.resetHistory()
         let description = engine.map { "\($0.size) \($0.mode.rawValue)" }
         shared.withLock { $0.engine = description }
+        guard let engine else { return }
+        currentQuality = engine.quality
+        manageEngines()
+        if adaptive.decision != nil { adaptiveEvent(.switched(engine.quality)) }
     }
 
     private func resetSourceState() {
@@ -415,6 +475,21 @@ public final class StylePipeline: @unchecked Sendable {
         lastContentTime = nil
         segmenter.reset()
         renderer.resetHistory()
+    }
+
+    /// Keeps the engine that ran last and the one wanted next, or else the adaptive trial or fallback, and unloads the
+    /// rest. An engine still referenced by frames in flight is freed when they finish.
+    private func manageEngines() {
+        var keep: [Quality] = []
+        let wanted = adaptive.decision?.quality ?? wantedQuality
+        for quality in [currentQuality, wanted, adaptive.trialQuality ?? adaptive.fallback].compactMap({ $0 })
+        where keep.count < 2 && !keep.contains(quality) {
+            keep.append(quality)
+        }
+        guard keep != keptEngines else { return }
+        keptEngines = keep
+        engines = engines.filter { keep.contains($0.key) }
+        for quality in keep where engines[quality] == nil { loadEngine(quality) }
     }
 
     private func loadEngine(_ quality: Quality) {
@@ -426,7 +501,7 @@ public final class StylePipeline: @unchecked Sendable {
                 let engine = try await StyleEngine.load(store: store, size: quality.size, mode: quality.mode)
                 queue.async { [self] in
                     loadingEngines.remove(quality)
-                    engines[quality] = engine
+                    if keptEngines.contains(quality) { engines[quality] = engine }
                 }
             } catch {
                 queue.async { [self] in
@@ -436,6 +511,50 @@ public final class StylePipeline: @unchecked Sendable {
                 record(error)
             }
         }
+    }
+
+    /// A trial runs on at most one frame at a time, after that frame's own inference.
+    private func assignTrial(to job: Job, running engine: StyleEngine) {
+        guard !trialBusy, let quality = adaptive.trialQuality, let trialEngine = engines[quality] else { return }
+        if trialEngine.size != engine.size {
+            guard let input = try? trialEngine.makeInputBuffer() else { return }
+            job.trialInput = input
+        }
+        job.trialEngine = trialEngine
+        trialBusy = true
+    }
+
+    /// Runs after the frame's post pass is committed, so a trial on a busy GPU does not delay the frame being output.
+    private func runTrial(_ engine: StyleEngine, input: CVPixelBuffer, style: StyleVector) {
+        engine.stylize(input, style: style) { [self] result in
+            let milliseconds = try? result.get().inferenceMilliseconds
+            queue.async { [self] in
+                trialBusy = false
+                if let milliseconds {
+                    adaptive.recordTrial(on: engine.quality, inference: milliseconds, now: HostClock.now().seconds)
+                    manageEngines()
+                }
+            }
+        }
+    }
+
+    private func recordAdaptiveFrame(_ quality: Quality, timings: FrameTimings) {
+        adaptive.recordFrame(on: quality, inference: timings.inferenceMilliseconds, total: timings.totalMilliseconds,
+                             now: HostClock.now().seconds)
+        manageEngines()
+    }
+
+    private func conditionsChanged() {
+        adaptive.update(.current(), now: HostClock.now().seconds)
+        manageEngines()
+    }
+
+    private func adaptiveEvent(_ event: AdaptiveEvent) {
+        let onEvent = shared.withLock { shared in
+            if case .decided(let decision) = event { shared.adaptive = decision }
+            return shared.onAdaptiveEvent
+        }
+        onEvent?(event)
     }
 
     private func loadPredictor() {
@@ -531,14 +650,18 @@ public final class StylePipeline: @unchecked Sendable {
         }
         onFrame?(ProcessedFrame(output: delivery.output, source: job.frame, stylized: delivery.stylized, timings: job.timings))
         stats.recordOutput(job.timings)
+        if let quality = job.quality {
+            let timings = job.timings
+            queue.async { [self] in recordAdaptiveFrame(quality, timings: timings) }
+        }
         inFlight.leave()
     }
 
     private func publishStats() {
-        let (engine, lastError, onStats, continuations) = shared.withLock {
-            ($0.engine, $0.lastError, $0.onStats, Array($0.statsContinuations.values))
+        let (engine, adaptive, lastError, onStats, continuations) = shared.withLock {
+            ($0.engine, $0.adaptive, $0.lastError, $0.onStats, Array($0.statsContinuations.values))
         }
-        let snapshot = stats.snapshot(engine: engine, lastError: lastError)
+        let snapshot = stats.snapshot(engine: engine, adaptive: adaptive, lastError: lastError)
         onStats?(snapshot)
         for continuation in continuations { continuation.yield(snapshot) }
     }

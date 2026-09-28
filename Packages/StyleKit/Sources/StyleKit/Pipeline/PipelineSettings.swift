@@ -28,7 +28,7 @@ public struct PipelineSettings: Sendable, Equatable {
     public var segmentationQuality: SegmentationQuality
     public var bypass: Bool
 
-    public init(quality: Quality = .balanced, style: StyleVector? = nil, strength: Float = 0.75, smoothing: Float = 0.8,
+    public init(quality: Quality = .auto, style: StyleVector? = nil, strength: Float = 0.75, smoothing: Float = 0.8,
                 upsampling: UpsamplingMode = .guided, detail: Float = 1, preserveColors: Bool = false,
                 mask: MaskMode = .everything, segmentationQuality: SegmentationQuality = .balanced, bypass: Bool = false) {
         self.quality = quality

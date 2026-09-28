@@ -33,22 +33,32 @@ public enum EngineMode: String, Sendable, CaseIterable {
 public struct Quality: Hashable, Sendable, CustomStringConvertible {
     public var size: ModelSize
     public var mode: EngineMode
+    /// Makes `size` on `mode` the preferred configuration instead of a fixed one. A real-time pipeline then steps down
+    /// to `size` on the Neural Engine and on to smaller sizes (down to 640x360) when frames miss their time budget, and
+    /// keeps the GPU free in Low Power Mode, on battery, or when the Mac is hot.
+    public var adaptive: Bool
 
-    public init(size: ModelSize, mode: EngineMode) {
+    public init(size: ModelSize, mode: EngineMode, adaptive: Bool = false) {
         self.size = size
         self.mode = mode
+        self.adaptive = adaptive
     }
 
-    /// Leaves the GPU to other apps. At 30 fps it is not faster than `balanced`: the Neural Engine is slower when it
-    /// idles between frames, and a paced 640x360 frame takes about twice its back-to-back time.
+    /// Leaves the GPU to other apps. At 30 fps on an otherwise idle Mac it is not faster than `balanced`: the Neural
+    /// Engine clocks down between frames, and a paced 640x360 frame takes about twice its back-to-back time. While the
+    /// GPU is busy it runs at its back-to-back speed.
     public static let fast = Quality(size: .size640x360, mode: .ane)
     public static let balanced = Quality(size: .size960x540, mode: .gpu)
     public static let max = Quality(size: .size1280x720, mode: .dual)
+    public static let auto = Quality(size: .size960x540, mode: .gpu, adaptive: true)
 
-    public var description: String { "\(size) \(mode.rawValue)" }
+    public var description: String { adaptive ? "auto, prefers \(size) \(mode.rawValue)" : "\(size) \(mode.rawValue)" }
+
+    var fixed: Quality { Quality(size: size, mode: mode) }
 }
 
 public enum QualityPreset: String, Sendable, CaseIterable, Identifiable {
+    case auto
     case fast
     case balanced
     case max
@@ -57,6 +67,7 @@ public enum QualityPreset: String, Sendable, CaseIterable, Identifiable {
 
     public var quality: Quality {
         switch self {
+        case .auto: .auto
         case .fast: .fast
         case .balanced: .balanced
         case .max: .max
