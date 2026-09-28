@@ -50,12 +50,14 @@ Moving the input by 1 to 3 px re-rolls the brush texture, and camera noise re-ro
 
 ```sh
 uv run stability_metrics.py magenta-replicate magenta-aa --data DATA --stills STILLS
-uv run train_stable.py --arch antialias --data DATA --out CKPT
+uv run train_stable.py --data DATA --out CKPT
 uv run stability_metrics.py magenta-replicate CKPT/antialias.pt --data DATA
 uv run convert_coreml.py --checkpoint CKPT/antialias.pt --sizes 960x540 --out OUT
 ```
 
-`DATA` holds COCO `val2017/`, a person-heavy subset of it in `content500/`, `heldout/`, and `video/` with the 720p60 clips `Johnny_1280x720_60.y4m` and `KristenAndSara_1280x720_60.y4m` (I420 y4m, read as limited range unless the header says `XCOLORRANGE=FULL`). The metrics use 50 held-out images that training skips, 3 paintings, and 100 frames of each clip at 960x540 and 30 fps. Moving pixels come from RAFT-small flow; torchvision downloads its weights on first use. `--arch antialias`, the default, blurs before the two stride-2 convs and upsamples bilinearly; the Magenta weights load into it unchanged. `convert_coreml.py --checkpoint` keeps the model inputs and outputs, and without `--out` it overwrites the shipped transformers.
+`DATA` holds COCO `val2017/`, a person-heavy subset of it in `content500/`, `heldout/`, and `video/` with the 720p60 clips `Johnny_1280x720_60.y4m` and `KristenAndSara_1280x720_60.y4m` (I420 y4m, read as limited range unless the header says `XCOLORRANGE=FULL`). The metrics use 50 held-out images and 3 paintings that training skips, and 100 frames of each clip at 960x540 and 30 fps. Moving pixels come from RAFT-small flow; torchvision downloads its weights on first use. `--arch antialias`, the default, blurs before the two stride-2 convs and upsamples bilinearly; the Magenta weights load into it unchanged. `convert_coreml.py --checkpoint` keeps the model inputs and outputs, and without `--out` it overwrites the shipped transformers.
+
+The teacher's fine texture moves with the stride-4 grid, not with the image, so a shift-stable student cannot match it pixel for pixel. A per-pixel or full-resolution VGG loss then pays the student to blur and lose contrast, and matching the energy of that texture makes the student add texture that flickers. `train_stable.py` distills to the teacher averaged over 4 grid positions, and compares low-passed pixels, pooled early VGG features, Gram matrices, and per-image band energy.
 
 Shipped model (replicate padding), 0-255 scale:
 

@@ -1,17 +1,26 @@
 """Fine-tune the Magenta style transformer for temporal stability.
 
-The student starts from the Magenta weights. It is distilled to the frozen original (smooth L1 on
-pixels, VGG16 feature and Gram distance to the teacher output for the same content and style)
-while being penalised for
+The student starts from the Magenta weights and is distilled to the frozen original for the same
+content and style. The teacher's fine texture re-rolls with the crop position, and a shift-stable
+student cannot match every roll: a per-pixel or full-resolution feature loss then rewards blur and
+lower contrast, and matching the rolled texture's energy adds texture that flickers. So the target
+is the teacher averaged over 4 positions of the stride-4 grid, compared with terms that do not
+depend on where the grid falls:
+  pix     smooth L1 on sigma 2 low-passed pixels (layout and tone)
+  perc    VGG16 relu1_2 and relu2_2 pooled to 16 px cells (local texture energy)
+  gram    VGG16 Gram matrices
+  band    mid and low band luma energy and luma std, per image (guards against blur and flattening)
+The student is also penalised for
   shift   student(shift(x)) != shift(student(x)), integer 1-3 px and subpixel shifts
   noise   student(x + n) != student(x), per-pixel and smooth noise
 
 --arch same keeps the architecture. --arch antialias blurs before the stride-2 convs and upsamples
 bilinearly (StyleTransformer(antialias=True)).
 
-Styles: the paintings in Styles/ (predictor, h256 rule), random convex mixes of them, and the
-predictor on random COCO images. Content: random 256-384 px crops of COCO val2017 minus the
-held-out images of stability_metrics.py, with the person-heavy content500/ oversampled.
+Styles: the paintings in Styles/ except the EVAL_STYLES of stability_metrics.py (predictor, h256
+rule), random convex mixes of them, and the predictor on random COCO images. Content: random
+256-384 px crops of COCO val2017 minus the held-out images of stability_metrics.py, with the
+person-heavy content500/ oversampled.
 
 Usage: uv run train_stable.py --arch antialias --data DIR --out DIR [--steps N] [--minutes M]
 """
@@ -29,7 +38,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from stability_metrics import VGG, catalog, device, gram, heldout_paths, style_vector, to_tensor
+from stability_metrics import (EVAL_STYLES, VGG, bands, catalog, device, gauss, gram, heldout_paths,
+                               style_vector, to_tensor)
 from tfjs_weights import load_predictor, load_transformer
 
 SIZES = [256, 288, 320, 352, 384]
@@ -38,6 +48,8 @@ BORDER = 16
 SOURCE = SIZES[-1] + 2 * MARGIN
 PERSON_WEIGHT = 8
 PIX_EPS = 0.01
+PERC_POOL = (16, 8)
+TEACHER_PHASES = [(0, 0), (0, 2), (2, 0), (2, 2)]
 
 
 def load_crop(path):
@@ -73,7 +85,7 @@ def training_paths(data):
 
 @torch.no_grad()
 def style_bank(predictor, paths, n_coco):
-    paintings = torch.cat([style_vector(predictor, Image.open(p)) for p in catalog().values()])
+    paintings = torch.cat([style_vector(predictor, Image.open(p)) for sid, p in catalog().items() if sid not in EVAL_STYLES])
     coco = torch.cat([style_vector(predictor, Image.open(p)) for p in random.sample(paths, n_coco)])
     return paintings, coco
 
@@ -140,13 +152,16 @@ def charbonnier(d, eps=PIX_EPS):
 
 
 def distill_terms(y, t, fy, ft):
-    """Smooth L1 on pixels, squared relative errors on features and Gram matrices. L1 or a plain norm
-    keeps a full-size gradient however close the student is to the teacher (bf16 rounding is
-    enough), and that drowns the stability terms."""
-    perc = sum(((a - b) ** 2).mean() / (b ** 2).mean().clamp_min(1e-6) for a, b in zip(fy, ft)) / len(fy)
+    """Squared relative errors on features and Gram matrices: an L1 or plain norm keeps a full-size
+    gradient however close the student is (bf16 rounding is enough), and that drowns the stability
+    terms."""
+    perc = sum(((F.avg_pool2d(a, p) - F.avg_pool2d(b, p)) ** 2).mean() / (F.avg_pool2d(b, p) ** 2).mean().clamp_min(1e-6)
+               for a, b, p in zip(fy, ft, PERC_POOL)) / len(PERC_POOL)
     g = sum((((gram(a) - gram(b)) ** 2).flatten(1).sum(1) / (gram(b) ** 2).flatten(1).sum(1)).mean()
             for a, b in zip(fy, ft)) / len(fy)
-    return charbonnier(y - t), perc, g
+    bt = bands(t, BORDER)[:, 1:]
+    band = ((bands(y, BORDER)[:, 1:] - bt).abs() / bt).mean()
+    return charbonnier(gauss(y, 2) - gauss(t, 2)), perc, g, band
 
 
 def lr_at(step, progress, lr, warmup=100):
@@ -174,11 +189,12 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=True,
                     help="bf16 autocast for the student and VGG, about 1.5x faster on MPS (fp16 gives NaN)")
-    ap.add_argument("--w-pix", type=float, default=1.0)
-    ap.add_argument("--w-perc", type=float, default=0.1)
+    ap.add_argument("--w-pix", type=float, default=3.0)
+    ap.add_argument("--w-perc", type=float, default=0.5)
     ap.add_argument("--w-gram", type=float, default=1.0)
-    ap.add_argument("--w-shift", type=float, default=6.0)
-    ap.add_argument("--w-noise", type=float, default=6.0)
+    ap.add_argument("--w-band", type=float, default=1.0)
+    ap.add_argument("--w-shift", type=float, default=12.0)
+    ap.add_argument("--w-noise", type=float, default=12.0)
     ap.add_argument("--coco-styles", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--save-every", type=int, default=1000)
@@ -224,7 +240,10 @@ def main():
         noisy = add_noise(x)
         inputs = [x, noisy, b] + ([] if a is None else [a])
         with torch.no_grad():
-            t = teacher(x, style)
+            ts = teacher(torch.cat([region[:, :, MARGIN + dy:MARGIN + dy + size, MARGIN + dx:MARGIN + dx + size]
+                                    for dy, dx in TEACHER_PHASES]), style.repeat(len(TEACHER_PHASES), 1, 1, 1))
+            t = sum(F.pad(tp, (dx, 0, dy, 0), mode="replicate")[:, :, :size, :size]
+                    for tp, (dy, dx) in zip(ts.split(len(x)), TEACHER_PHASES)) / len(TEACHER_PHASES)
         with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=args.bf16):
             ys = student(torch.cat(inputs), style.repeat(len(inputs), 1, 1, 1)).float().split(len(x))
             y, yn, yb = ys[:3]
@@ -232,11 +251,10 @@ def main():
             fy, ft = [[f.float() for f in vgg(v)] for v in (y, t)]
         inner = size - 2 * BORDER
         losses = {}
-        losses["pix"], losses["perc"], losses["gram"] = distill_terms(y, t, fy, ft)
+        losses["pix"], losses["perc"], losses["gram"], losses["band"] = distill_terms(y, t, fy, ft)
         losses["shift"] = (sample_at(ya, ay, ax, inner) - sample_at(yb, by, bx, inner)).abs().mean()
         losses["noise"] = (sample_at(yn, BORDER, BORDER, inner) - sample_at(y.detach(), BORDER, BORDER, inner)).abs().mean()
-        total = (args.w_pix * losses["pix"] + args.w_perc * losses["perc"] + args.w_gram * losses["gram"]
-                 + args.w_shift * losses["shift"] + args.w_noise * losses["noise"])
+        total = sum(getattr(args, f"w_{k}") * v for k, v in losses.items())
         opt.zero_grad(set_to_none=True)
         total.backward()
         opt.step()
