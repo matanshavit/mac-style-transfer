@@ -47,8 +47,33 @@ Camera extension: sink stream -> source stream -> Zoom / Meet / FaceTime
 6. **Signing**: team ID lives in `Config/Local.xcconfig` (gitignored). Without a team, the app builds and runs locally (preview only), and the extension cannot be installed.
 7. Later: smaller per-painting networks trained on this Mac (PyTorch MPS) with a stability loss, if they beat Magenta on speed or look.
 
+## App
+
+- One main window, a menu bar item and a Settings window. Closing the window keeps the app running, so the virtual camera keeps working. The Dock icon or the menu bar brings the window back.
+- **Camera lifecycle.** The camera and the pipeline run only while the main window is visible (not closed, minimized, fully covered, or behind a locked screen) or the virtual camera has at least one client. Otherwise they stop after 2 s and the camera light goes off. The client count is the extension's `scsc` device property, which `VirtualCameraOutput` reads once a second while connected. The app stays connected to the sink all the time to read it; frames only flow while the pipeline runs.
+- The app never asks for camera access by itself. The preview shows a button for it.
+- The controls are a plain side column, not a SwiftUI inspector. The inspector's glass background does not render in snapshots, so it could not be checked.
+- Settings are in UserDefaults. Custom styles are in `~/Library/Application Support/StyleCam/Styles`.
+- Styles can be switched from Shortcuts and Spotlight (App Intents: Set StyleCam Style, Toggle StyleCam Style).
+
+## Debug hooks
+
+Debug builds only. Launch arguments:
+
+- `-StyleCamVideoFile <file.y4m>` plays the file at 30 fps, looping, instead of the camera. No camera permission.
+- `-StyleCamStyle <id>`, `-StyleCamShowStats YES`, `-StyleCamWindowSize 900x600`.
+- `-StyleCamCameraAccess notDetermined|denied` shows that permission state and never opens the camera.
+- `-StyleCamSnapshot <file.png> [-StyleCamSnapshotDelay 5]` writes the window to `<file>.png` and the latest output frame to `<file>-frame.png`, then quits. `cacheDisplay` cannot draw the video layer, so the latest frame is drawn in its place. It also cannot draw the glass toolbar (a blank capsule) or menus.
+- With any of them, saved settings and the window frame are left alone, and the window counts as visible while it is open, even with the screen locked.
+
+```sh
+open -n build/DerivedData/Build/Products/Debug/StyleCam.app --args \
+  -StyleCamVideoFile clip.y4m -StyleCamStyle starry_night -StyleCamSnapshot /tmp/ui.png -StyleCamSnapshotDelay 8
+```
+
 ## Dev loop
 
 - `make generate` then `make build`. See README.
+- `make run-demo` runs the app on a video file instead of the camera.
 - Most work happens in the app and `stylecam-cli`, with no extension reinstall.
 - Extension changes: bump `CURRENT_PROJECT_VERSION`, reinstall from the app, and expect a reboot sometimes.

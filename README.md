@@ -9,9 +9,13 @@ Needs Xcode 26+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew ins
 ```sh
 make generate   # creates StyleCam.xcodeproj from project.yml
 make build      # builds the app without signing (preview only)
+make run-demo   # runs that build on a video instead of the camera
+make install    # signed build, copied to /Applications
 ```
 
-To use the virtual camera you need a paid Apple Developer team. See [docs/NEEDS_INPUT.md](docs/NEEDS_INPUT.md).
+`make run-demo` plays `data/video/Johnny_1280x720_60.y4m` by default. Pass `VIDEO=path/to/file.y4m` and optionally `STYLE=great_wave`.
+
+To use the virtual camera you need a paid Apple Developer team, and the app must run from `/Applications` (`make install`). See [docs/NEEDS_INPUT.md](docs/NEEDS_INPUT.md).
 
 ## Docs
 
