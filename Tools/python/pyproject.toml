@@ -8,6 +8,7 @@ dependencies = [
     "numpy",
     "pillow",
     "torch==2.7.1",
+    "torchvision==0.22.1",
 ]
 
 [tool.uv]
