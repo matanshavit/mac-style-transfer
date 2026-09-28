@@ -24,8 +24,8 @@ public final class StylePredictor: @unchecked Sendable {
     private let fixedSize: ModelSize?
     private let allowedSizes: Set<ModelSize>
 
-    public static func load(from store: ModelStore, computeUnits: MLComputeUnits = .cpuAndNeuralEngine) async throws -> StylePredictor {
-        try StylePredictor(model: await store.loadModel(named: ModelStore.predictorNames, computeUnits: computeUnits))
+    public static func load(from store: ModelStore) async throws -> StylePredictor {
+        try StylePredictor(model: await store.loadModel(named: ModelStore.predictorName, computeUnits: .cpuAndNeuralEngine))
     }
 
     public init(model: MLModel) throws {

@@ -304,7 +304,6 @@ public final class VirtualCameraOutput: @unchecked Sendable {
     }
 }
 
-/// Frames go to the sink only while connected; otherwise they are dropped.
 extension VirtualCameraOutput: FrameOutput {
     public func publish(_ pixelBuffer: CVPixelBuffer, time: CMTime) {
         send(pixelBuffer)

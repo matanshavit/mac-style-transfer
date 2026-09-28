@@ -17,7 +17,6 @@ public struct FrameTimings: Sendable {
 }
 
 public struct PipelineStats: Sendable {
-    public var captureFPS: Double
     public var outputFPS: Double
     public var inferenceMillisecondsP50: Double
     public var latencyMillisecondsP50: Double
@@ -25,7 +24,7 @@ public struct PipelineStats: Sendable {
     public var droppedFrames: Int
     public var totalDroppedFrames: Int
     /// For example "960x540 gpu steady", or "480x270 ane classic (no steady model)" when the chosen network has no
-    /// model at that size. Nil while bypassing.
+    /// model at that size. Nil while frames pass through.
     public var engine: String?
     /// What an adaptive quality runs or is switching to, and why. Nil for a fixed quality.
     public var adaptive: AdaptiveDecision?
@@ -35,7 +34,6 @@ public struct PipelineStats: Sendable {
 final class StatsCollector: Sendable {
     private struct Window {
         var start = HostClock.now()
-        var captured = 0
         var output = 0
         var dropped = 0
         var totalDropped = 0
@@ -44,10 +42,6 @@ final class StatsCollector: Sendable {
     }
 
     private let window = Mutex(Window())
-
-    func recordCapture() {
-        window.withLock { $0.captured += 1 }
-    }
 
     func recordDrop() {
         window.withLock {
@@ -69,10 +63,9 @@ final class StatsCollector: Sendable {
             let now = HostClock.now()
             let seconds = max((now - window.start).seconds, 1e-3)
             let stats = PipelineStats(
-                captureFPS: Double(window.captured) / seconds, outputFPS: Double(window.output) / seconds,
-                inferenceMillisecondsP50: median(window.inference), latencyMillisecondsP50: median(window.latency),
-                droppedFrames: window.dropped, totalDroppedFrames: window.totalDropped, engine: engine, adaptive: adaptive,
-                lastError: lastError)
+                outputFPS: Double(window.output) / seconds, inferenceMillisecondsP50: median(window.inference),
+                latencyMillisecondsP50: median(window.latency), droppedFrames: window.dropped,
+                totalDroppedFrames: window.totalDropped, engine: engine, adaptive: adaptive, lastError: lastError)
             window = Window(start: now, totalDropped: window.totalDropped)
             return stats
         }

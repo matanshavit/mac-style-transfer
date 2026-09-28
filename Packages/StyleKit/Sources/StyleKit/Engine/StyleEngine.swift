@@ -73,7 +73,7 @@ public final class StyleEngine: @unchecked Sendable {
 
     public static func load(store: ModelStore, network: StyleNetwork, size: ModelSize,
                             mode: EngineMode) async throws -> StyleEngine {
-        let name = [ModelStore.transformerName(for: network, size: size)]
+        let name = ModelStore.transformerName(for: network, size: size)
         var instances: [Instance] = []
         if mode != .ane {
             let model = try await store.loadModel(named: name, computeUnits: .cpuAndGPU, lowPrecisionAccumulationOnGPU: true)
@@ -123,12 +123,6 @@ public final class StyleEngine: @unchecked Sendable {
             nextSequence += 1
             pending.append(request)
             dispatchPending()
-        }
-    }
-
-    public func stylize(_ content: CVPixelBuffer, style: StyleVector) async throws -> StylizedFrame {
-        try await withCheckedThrowingContinuation { continuation in
-            stylize(content, style: style) { continuation.resume(with: $0) }
         }
     }
 

@@ -6,16 +6,10 @@ import Synchronization
 public struct CameraDevice: Sendable, Hashable, Identifiable {
     public let id: String
     public let name: String
-    public let modelID: String
-    public let manufacturer: String
-    public let isExternal: Bool
 
     init(_ device: AVCaptureDevice) {
         id = device.uniqueID
         name = device.localizedName
-        modelID = device.modelID
-        manufacturer = device.manufacturer
-        isExternal = device.deviceType != .builtInWideAngleCamera
     }
 }
 
@@ -41,8 +35,8 @@ public enum CameraSessionEvent: Sendable {
     case interruptionEnded
 }
 
-/// Captures 1280x720 BGRA at 30 fps from a real camera. Devices whose uniqueID is in `excludedDeviceUIDs` are never
-/// listed or opened, so the app's own virtual camera cannot feed itself.
+/// Devices whose uniqueID is in `excludedDeviceUIDs` are never listed or opened, so the app's own virtual camera cannot
+/// feed itself.
 public final class CameraCapture: NSObject, FrameSource, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     public static let width = 1280
     public static let height = 720

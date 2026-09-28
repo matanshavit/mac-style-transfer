@@ -66,8 +66,8 @@ def _load_convbn(m, src, prefix, depthwise=False):
     _load_bn(m.bn, src, f"{prefix}/BatchNorm")
 
 
-def load_predictor(cache=CACHE):
-    src = _Weights(os.path.join(cache, "predictor"))
+def load_predictor():
+    src = _Weights(os.path.join(CACHE, "predictor"))
     m = StylePredictor().eval()
     _load_convbn(m.stem, src, "MobilenetV2/Conv")
     for i, block in enumerate(m.blocks):
@@ -92,8 +92,8 @@ def _load_cin(norm, src, prefix):
     norm.gamma.bias.data.copy_(src.raw(f"{sp}/Conv_1/biases"))
 
 
-def load_transformer(padding_mode="replicate", cache=CACHE, antialias=False):
-    src = _Weights(os.path.join(cache, "transformer"))
+def load_transformer(padding_mode="replicate", antialias=False):
+    src = _Weights(os.path.join(CACHE, "transformer"))
     m = StyleTransformer(padding_mode=padding_mode, antialias=antialias).eval()
 
     w = src.w

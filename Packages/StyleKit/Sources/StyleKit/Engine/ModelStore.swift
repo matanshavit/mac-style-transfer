@@ -7,7 +7,7 @@ public enum ModelStoreError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .notFound(let names): "model not found: \(names)"
+        case .notFound(let name): "model not found: \(name)"
         }
     }
 }
@@ -20,21 +20,20 @@ public actor ModelStore {
         case directory(URL)
     }
 
-    public static let predictorNames = ["MagentaPredictor_h256", "MagentaPredictor"]
+    public static let predictorName = "MagentaPredictor"
 
     public static func transformerName(for network: StyleNetwork, size: ModelSize) -> String {
         "\(network.modelPrefix)_\(size.width)x\(size.height)"
     }
 
     public nonisolated let locations: [Location]
-    public nonisolated let cacheDirectory: URL
+    private let cacheDirectory = URL.cachesDirectory
+        .appending(path: Bundle.main.bundleIdentifier ?? "StyleKit", directoryHint: .isDirectory)
+        .appending(path: "CompiledModels", directoryHint: .isDirectory)
     private var compiling: [URL: Task<URL, any Error>] = [:]
 
-    public init(locations: [Location], cacheDirectory: URL? = nil) {
+    public init(locations: [Location]) {
         self.locations = locations
-        self.cacheDirectory = cacheDirectory ?? URL.cachesDirectory
-            .appending(path: Bundle.main.bundleIdentifier ?? "StyleKit", directoryHint: .isDirectory)
-            .appending(path: "CompiledModels", directoryHint: .isDirectory)
     }
 
     public init(directory: URL) {
@@ -45,19 +44,15 @@ public actor ModelStore {
         ModelSize.standard.filter { locate(Self.transformerName(for: network, size: $0)) != nil }
     }
 
-    /// URL of a compiled model, compiling an `.mlpackage` on first use.
-    public func compiledModelURL(named names: [String]) async throws -> URL {
-        for name in names {
-            guard let found = locate(name) else { continue }
-            if found.pathExtension == "mlmodelc" { return found }
-            return try await compile(found, name: name)
-        }
-        throw ModelStoreError.notFound(names.joined(separator: " or "))
+    public func compiledModelURL(named name: String) async throws -> URL {
+        guard let found = locate(name) else { throw ModelStoreError.notFound(name) }
+        if found.pathExtension == "mlmodelc" { return found }
+        return try await compile(found, name: name)
     }
 
-    public nonisolated func loadModel(named names: [String], computeUnits: MLComputeUnits,
+    public nonisolated func loadModel(named name: String, computeUnits: MLComputeUnits,
                                       lowPrecisionAccumulationOnGPU: Bool = false) async throws -> MLModel {
-        let url = try await compiledModelURL(named: names)
+        let url = try await compiledModelURL(named: name)
         let configuration = MLModelConfiguration()
         configuration.computeUnits = computeUnits
         configuration.allowLowPrecisionAccumulationOnGPU = lowPrecisionAccumulationOnGPU

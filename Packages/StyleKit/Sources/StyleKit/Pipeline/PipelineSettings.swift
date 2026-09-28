@@ -28,12 +28,11 @@ public struct PipelineSettings: Sendable, Equatable {
     /// Balanced by default: at 30 fps its mask is as fresh as the fast one (the current frame at the balanced preset,
     /// the previous frame at fast) and has twice the resolution.
     public var segmentationQuality: SegmentationQuality
-    public var bypass: Bool
 
     public init(quality: Quality = .auto, network: StyleNetwork = .steady, style: StyleVector? = nil,
                 strength: Float = 0.75, smoothing: Float = 0.8, upsampling: UpsamplingMode = .guided, detail: Float = 1,
                 preserveColors: Bool = false, mask: MaskMode = .everything,
-                segmentationQuality: SegmentationQuality = .balanced, bypass: Bool = false) {
+                segmentationQuality: SegmentationQuality = .balanced) {
         self.quality = quality
         self.network = network
         self.style = style
@@ -44,6 +43,5 @@ public struct PipelineSettings: Sendable, Equatable {
         self.preserveColors = preserveColors
         self.mask = mask
         self.segmentationQuality = segmentationQuality
-        self.bypass = bypass
     }
 }

@@ -35,8 +35,8 @@ public final class StylePipeline: @unchecked Sendable {
     private static let failedFrameLimit = 30
 
     public let modelStore: ModelStore
-    public let outputWidth: Int
-    public let outputHeight: Int
+    public let outputWidth = 1280
+    public let outputHeight = 720
     public let backpressure: Backpressure
 
     private struct Shared: Sendable {
@@ -142,11 +142,9 @@ public final class StylePipeline: @unchecked Sendable {
     private var deviceAges: [ComputeDevice: DeviceAge] = [:]
 
     public init(modelStore: ModelStore, settings: PipelineSettings = PipelineSettings(),
-                backpressure: Backpressure = .dropFrames, outputWidth: Int = 1280, outputHeight: Int = 720) throws {
+                backpressure: Backpressure = .dropFrames) throws {
         self.modelStore = modelStore
         self.backpressure = backpressure
-        self.outputWidth = outputWidth
-        self.outputHeight = outputHeight
         context = try MetalContext()
         renderer = try FrameRenderer(context: context, outputWidth: outputWidth, outputHeight: outputHeight)
         segmenter = PersonSegmenter(device: context.device)
@@ -287,7 +285,6 @@ public final class StylePipeline: @unchecked Sendable {
     }
 
     public func submit(_ frame: VideoFrame) {
-        stats.recordCapture()
         if backpressure == .waitForSlot { admission.enter() }
         inFlight.enter()
         let job = Job(frame: frame, settings: settings)
@@ -334,7 +331,7 @@ public final class StylePipeline: @unchecked Sendable {
 
     /// Nil passes the frame through. The active engine keeps running while the wanted one loads.
     private func engine(for settings: PipelineSettings) -> StyleEngine? {
-        guard !settings.bypass, settings.style != nil else { return nil }
+        guard settings.style != nil else { return nil }
         let networkChanged = settings.network != network
         network = settings.network
         let quality = engineQuality(for: settings.quality)

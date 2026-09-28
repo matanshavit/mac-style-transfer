@@ -75,8 +75,6 @@ public actor StyleLibrary {
 
     public var styles: [StyleInfo] { builtInStyles + custom }
 
-    public var customStyles: [StyleInfo] { custom }
-
     public func style(id: String) -> StyleInfo? {
         styles.first { $0.id == id }
     }
@@ -122,12 +120,13 @@ public actor StyleLibrary {
         vectors[id] = nil
     }
 
-    /// Decodes an image with its EXIF orientation applied, downsampled so the long side is at most `maxPixelSize`.
-    public static func loadImage(at url: URL, maxPixelSize: Int = customImageMaxPixelSize) throws -> CGImage {
+    /// Decodes an image with its EXIF orientation applied, downsampled so the long side is at most
+    /// `customImageMaxPixelSize`.
+    public static func loadImage(at url: URL) throws -> CGImage {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceThumbnailMaxPixelSize: customImageMaxPixelSize,
         ]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {

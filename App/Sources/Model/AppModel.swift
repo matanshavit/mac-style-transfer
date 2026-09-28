@@ -255,7 +255,6 @@ final class AppModel {
         return URLSession(configuration: configuration)
     }()
 
-    /// Returns why the style could not be added, or nil once it is added and selected.
     private func importStyle(_ add: (StyleLibrary) async throws -> StyleInfo?) async -> String? {
         importCount += 1
         defer { importCount -= 1 }
