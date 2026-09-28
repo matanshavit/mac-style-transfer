@@ -12,7 +12,7 @@ public enum MaskMode: String, Sendable, CaseIterable {
 
 public struct PipelineSettings: Sendable, Equatable {
     public var quality: Quality
-    /// Sizes without a model for this network, or whose model failed to load, run classic.
+    /// Sizes without a model for this network, or whose engine failed, run classic.
     public var network: StyleNetwork
     /// Nil outputs the camera unchanged.
     public var style: StyleVector?

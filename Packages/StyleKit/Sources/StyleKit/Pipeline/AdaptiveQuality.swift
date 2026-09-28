@@ -33,7 +33,7 @@ public enum AdaptiveReason: Sendable, Equatable, CustomStringConvertible {
         case .trialFit(let milliseconds, let limit): "trial took \(Self.format(milliseconds)) ms, limit \(Self.format(limit)) ms"
         case .trialTooSlow(let quality, let milliseconds, let limit):
             "\(quality) trial took \(Self.format(milliseconds)) ms, limit \(Self.format(limit)) ms"
-        case .engineFailed(let quality): "\(quality) failed to load"
+        case .engineFailed(let quality): "\(quality) failed"
         case .lowPowerMode: "Low Power Mode"
         case .batteryPower: "on battery"
         case .thermalState(let state): "thermal state \(Self.name(state))"
@@ -79,7 +79,7 @@ public enum AdaptiveEvent: Sendable, CustomStringConvertible {
 /// on copies of the frames while the current step keeps producing output, so a busy GPU never shows as a stutter.
 /// A trial starts only from a step that fits its budget, and failed trials back off from 20 s to 160 s. No step-down
 /// happens while a trial runs, which takes about a second, and the window starts over after it because the trial
-/// slows the running step.
+/// slows the running step. The window also starts over after a gap in frames, such as Original or a camera restart.
 final class AdaptiveController {
     static let budgetFraction = 0.65
     static let trialFraction = 0.9
@@ -183,6 +183,7 @@ final class AdaptiveController {
     /// A frame from `quality`'s engine reached the outputs.
     func recordFrame(on quality: Quality, inference: Double, total: Double, now: Double) {
         guard preferred != nil, quality == steps[step] else { return }
+        if let last = samples.last, now - last.time > Self.window { resetStep() }
         if let trial, now - trial.started > Self.trialTimeout {
             endTrial()
             backOff(now)
@@ -226,7 +227,7 @@ final class AdaptiveController {
         }
     }
 
-    /// Drops a configuration whose engine failed to load. Returns whether it was one of the steps.
+    /// Drops a configuration whose engine failed to load or keeps failing. Returns whether it was one of the steps.
     func engineFailed(_ quality: Quality) -> Bool {
         guard preferred != nil, steps.count > 1, let index = steps.firstIndex(of: quality) else { return false }
         steps.remove(at: index)

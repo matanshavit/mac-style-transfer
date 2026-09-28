@@ -22,8 +22,8 @@ public struct ProcessedFrame: @unchecked Sendable {
 /// engines stay loaded, the running one and the one being switched to or the adaptive fallback, plus an adaptive trial
 /// while one runs.
 ///
-/// A size without a model for the chosen network, or whose model failed to load, runs classic, so the choice of
-/// network never stops frames from being stylized.
+/// A size without a model for the chosen network, or whose engine failed to load or keeps failing, runs classic, so the
+/// choice of network never stops frames from being stylized.
 public final class StylePipeline: @unchecked Sendable {
     public enum Backpressure: Sendable {
         case dropFrames
@@ -31,6 +31,8 @@ public final class StylePipeline: @unchecked Sendable {
     }
 
     public static let contentVectorInterval = CMTime(value: 1, timescale: 2)
+    /// Frames in a row that fail to stylize before their engine is treated like one that failed to load.
+    private static let failedFrameLimit = 30
 
     public let modelStore: ModelStore
     public let outputWidth: Int
@@ -127,6 +129,7 @@ public final class StylePipeline: @unchecked Sendable {
     private var wantedQuality: Quality?
     private var trialBusy = false
     private var engineFrames = 0
+    private var failedFrames = 0
     private var waiting: [Job] = []
     private var segmentation: SegmentationQuality?
     private var predictor = PredictorState.idle
@@ -215,20 +218,42 @@ public final class StylePipeline: @unchecked Sendable {
     }
 
     /// Loads the engine for the current quality and the style predictor, so the first frames are stylized.
-    /// Without it they are loaded on demand and frames pass through unstylized meanwhile.
+    /// Without it they are loaded on demand and frames pass through unstylized meanwhile. Frames that arrive while it
+    /// runs pass through too, and wait for its engine instead of loading a second copy.
     public func prepare() async throws {
         let wanted = await withCheckedContinuation { continuation in
             queue.async { [self] in
                 let settings = settings
                 network = settings.network
-                continuation.resume(returning: engineKey(for: engineQuality(for: settings.quality)))
+                let quality = engineQuality(for: settings.quality)
+                if wantedQuality == nil { wantedQuality = quality }
+                continuation.resume(returning: engineKey(for: quality))
             }
         }
         let key: EngineKey
         let engine: StyleEngine
+        let predictor: StylePredictor
         do {
-            engine = try await Self.loadEngine(wanted, from: modelStore)
-            key = wanted
+            (key, engine) = try await loadEngineOrClassic(wanted)
+            predictor = try await StylePredictor.load(from: modelStore)
+        } catch {
+            queue.async { [self] in manageEngines() }
+            throw error
+        }
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                if engines[key] == nil, wantedQuality == key.quality { engines[key] = engine }
+                failedEngines.remove(key)
+                manageEngines()
+                self.predictor = .ready(predictor)
+                continuation.resume()
+            }
+        }
+    }
+
+    private func loadEngineOrClassic(_ wanted: EngineKey) async throws -> (EngineKey, StyleEngine) {
+        do {
+            return (wanted, try await Self.loadEngine(wanted, from: modelStore))
         } catch {
             let fallback = await withCheckedContinuation { continuation in
                 queue.async { [self] in
@@ -238,19 +263,7 @@ public final class StylePipeline: @unchecked Sendable {
             }
             guard fallback != wanted else { throw error }
             record(error)
-            engine = try await Self.loadEngine(fallback, from: modelStore)
-            key = fallback
-        }
-        let predictor = try await StylePredictor.load(from: modelStore)
-        await withCheckedContinuation { continuation in
-            queue.async { [self] in
-                engines[key] = engine
-                failedEngines.remove(key)
-                wantedQuality = key.quality
-                manageEngines()
-                self.predictor = .ready(predictor)
-                continuation.resume()
-            }
+            return (fallback, try await Self.loadEngine(fallback, from: modelStore))
         }
     }
 
@@ -344,7 +357,7 @@ public final class StylePipeline: @unchecked Sendable {
         return adaptive.target(for: quality, sizes: sizes, current: currentKey?.quality, now: HostClock.now().seconds)
     }
 
-    /// The chosen network, or classic where the chosen one has no model or its model failed to load.
+    /// The chosen network, or classic where the chosen one has no model or its engine failed.
     private func engineKey(for quality: Quality) -> EngineKey {
         let chosen = EngineKey(network: network, quality: quality)
         guard !hasModel(chosen), modelSizes[.classic]?.contains(quality.size) == true else { return chosen }
@@ -441,15 +454,17 @@ public final class StylePipeline: @unchecked Sendable {
             segmenter.submit(input, quality: job.settings.segmentationQuality)
         }
         engine.stylize(input, style: style) { [self] result in
-            queue.async { [self] in stylized(job, style: style, result: result) }
+            queue.async { [self] in stylized(job, engine: engine, style: style, result: result) }
         }
     }
 
-    private func stylized(_ job: Job, style: StyleVector, result: Result<StylizedFrame, any Error>) {
+    private func stylized(_ job: Job, engine: StyleEngine, style: StyleVector, result: Result<StylizedFrame, any Error>) {
         switch result {
         case .failure(let error):
+            stylizeFailed(on: engine)
             fail(job, error)
         case .success(let frame):
+            failedFrames = 0
             guard let input = job.input else { return fail(job, nil) }
             let trialEngine = job.trialEngine
             job.trialEngine = nil
@@ -513,6 +528,7 @@ public final class StylePipeline: @unchecked Sendable {
     private func activate(_ engine: StyleEngine?) {
         if activeEngine == nil { renderer.resetHistory() }
         activeEngine = engine
+        failedFrames = 0
         admission.setLimit((engine?.maxConcurrentFrames ?? 1) + 1)
         describeEngine()
         guard let engine else { return }
@@ -528,7 +544,7 @@ public final class StylePipeline: @unchecked Sendable {
             let text = "\(engine.size) \(engine.mode.rawValue) \(engine.network.rawValue)"
             let chosen = EngineKey(network: network, quality: engine.quality)
             guard engine.network != network, engineKey(for: engine.quality) != chosen else { return text }
-            return text + (failedEngines.contains(chosen) ? " (\(network) failed to load)" : " (no \(network) model)")
+            return text + (failedEngines.contains(chosen) ? " (\(network) failed)" : " (no \(network) model)")
         }
         shared.withLock { $0.engine = description }
     }
@@ -566,7 +582,7 @@ public final class StylePipeline: @unchecked Sendable {
                 let engine = try await Self.loadEngine(key, from: store)
                 queue.async { [self] in
                     loadingEngines.remove(key)
-                    if keptEngines.contains(key) { engines[key] = engine }
+                    if keptEngines.contains(key), engines[key] == nil { engines[key] = engine }
                 }
             } catch {
                 queue.async { [self] in
@@ -581,6 +597,19 @@ public final class StylePipeline: @unchecked Sendable {
 
     private static func loadEngine(_ key: EngineKey, from store: ModelStore) async throws -> StyleEngine {
         try await StyleEngine.load(store: store, network: key.network, size: key.quality.size, mode: key.quality.mode)
+    }
+
+    /// Unloads an engine whose frames keep failing. Frames pass through until the engine that replaces it runs.
+    private func stylizeFailed(on engine: StyleEngine) {
+        guard engine === activeEngine else { return }
+        failedFrames += 1
+        guard failedFrames == Self.failedFrameLimit else { return }
+        let key = EngineKey(network: engine.network, quality: engine.quality)
+        failedEngines.insert(key)
+        engines[key] = nil
+        currentKey = nil
+        activate(nil)
+        engineFailed(key)
     }
 
     /// A failed network other than classic falls back to classic at that size. A failed classic engine drops the
