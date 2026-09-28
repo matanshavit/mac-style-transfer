@@ -13,7 +13,7 @@ Earlier version: [webcam-style-transfer](https://github.com/matanshavit/webcam-s
 ```
 Webcam -> AVCaptureSession (app)
        -> scale down (Metal)
-       -> style network (Core ML, Neural Engine)
+       -> style network (Core ML, GPU or Neural Engine)
        -> upscale + blend + smooth (Metal)
        -> NV12 frame -> CMIO sink stream
 Camera extension: sink stream -> source stream -> Zoom / Meet / FaceTime
@@ -40,12 +40,12 @@ Camera extension: sink stream -> source stream -> Zoom / Meet / FaceTime
 
 ## Decisions
 
-1. **Core ML on the Neural Engine** for the network. MLX has no ANE access. Metal 4 ML is new and unproven here.
+1. **Core ML, on the GPU or the Neural Engine** for the network (auto picks, see 8). MLX has no ANE access. Metal 4 ML is new and unproven here.
 2. **Start with the Magenta arbitrary style network** (the one the old app used), ported to Core ML. One model covers all paintings and custom images. The style is a 100-number vector, so switching is instant.
 3. **Run the network below output resolution** (for example 640x360) and upscale with an edge-aware filter guided by the full-res camera frame. At 720p the network costs about 283 GFLOP per frame, which is too tight.
 4. **Temporal smoothing in Metal**: motion-aware blend with the previous output. Cheap, no optical flow needed. Optical flow (Vision) is a later option.
 5. **XcodeGen** generates the Xcode project (`project.yml`). The `.xcodeproj` is not committed.
-6. **Signing**: team ID lives in `Config/Local.xcconfig` (gitignored). Without a team, the app builds and runs locally (preview only), and the extension cannot be installed.
+6. **Signing**: team ID lives in `Config/Local.xcconfig` (gitignored). Without a team, the app builds and runs locally and can feed OBS Virtual Camera (experimental), but the extension cannot be installed.
 7. Later: smaller per-painting networks trained on this Mac (PyTorch MPS) with a stability loss, if they beat Magenta on speed or look.
 8. **Auto quality is the default** (`Quality.auto`). Steps: 960x540 GPU, 960x540 ANE, 640x360 ANE, 480x270 ANE. 480x270 is the last resort for when the ANE is busy too: smooth comes before pretty. The budget is 65% of the camera frame interval (21.7 ms at 30 fps), checked on the p50 of admission-to-output time over 1.5 s. Over budget: go one step down. The next step down stays loaded, so the switch drops at most one frame.
    - Going up needs a trial. The higher step runs on copies of the frames next to the step that feeds the output, and must fit 90% of the budget. A trial only starts once the current step fits its budget. A trial on the ANE from a smaller ANE step also needs the ANE to have time for both frames (estimated by pixel count), so the trial does not hold up output frames. At 60 fps that rules out ANE trials. Trials run at start, then 20 s after a step down, and back off to 160 s.
@@ -53,10 +53,11 @@ Camera extension: sink stream -> source stream -> Zoom / Meet / FaceTime
    - It starts on the ANE and tries the GPU once the ANE step fits. A busy GPU drops nothing at startup. A free one takes over after the first window plus the trial, about 2.5 s at 30 fps.
    - On battery, in Low Power Mode, or at thermal state serious or critical, it uses the ANE only.
    - At most two engines stay loaded, the running one and the next one (a switch target or the fallback), plus the trial while one runs. Engines that are not needed are unloaded.
-   - A step whose engine fails to load is skipped. There is no retry.
+   - A step whose engine fails to load, or fails 30 frames in a row, is skipped. There is no retry.
    - It only adapts in real-time runs (`.dropFrames`). Offline runs use the preferred step.
 9. **Two networks, steady by default.** `classic` is the Magenta transformer (`MagentaTransformer_<W>x<H>`). `steady` is the same network, anti-aliased and fine-tuned against flicker by `Tools/python/train_stable.py` (`StableTransformer_<W>x<H>`). Same inputs and output. Steady is the default because shimmer on a still background is the most visible fault in a call, and it costs 1-3 ms of ANE time per frame. That puts 960x540 ANE at the edge of auto's budget (see Measurements). The app has a "Steady brushwork" switch in the Style section; the CLI defaults to classic so older numbers stay comparable.
-   - A size with no steady model, or whose steady model fails to load, runs classic, so frames never stop. Auto steps over the sizes either network has. The stats engine row names the network and says when it fell back, for example `480x270 ane classic (no steady model)`.
+   - No steady models are committed yet. Until they are exported (below), every build runs classic and the app's switch is off.
+   - A size with no steady model, or whose steady engine fails, runs classic, so frames never stop. Auto steps over the sizes either network has. The stats engine row names the network and says when it fell back, for example `480x270 ane classic (no steady model)`.
    - Export the steady models from a checkpoint with `cd Tools/python && uv run convert_coreml.py --checkpoint <ckpt.pt>`. It writes `Models/StableTransformer_{480x270,640x360,960x540,1280x720}.mlpackage` (change with `--sizes`, `--out`, `--name`) and leaves the predictor alone. `make build` then bundles them.
 
 ## Measurements
@@ -84,7 +85,7 @@ Camera extension: sink stream -> source stream -> Zoom / Meet / FaceTime
 
 Debug builds only. Launch arguments:
 
-- `-StyleCamVideoFile <file.y4m>` plays the file at 30 fps, looping, instead of the camera. No camera permission.
+- `-StyleCamVideoFile <file.y4m>` plays the file at 30 fps, looping, instead of the camera. No camera permission. The path must be absolute, because `open` starts the app in `/`.
 - `-StyleCamStyle <id>`, `-StyleCamShowStats YES`, `-StyleCamWindowSize 900x600`, `-StyleCamVirtualCameraOutput stylecam|obs`.
 - `-StyleCamCameraAccess notDetermined|denied` shows that permission state and never opens the camera.
 - `-StyleCamSnapshot <file.png> [-StyleCamSnapshotDelay 5]` writes the window to `<file>.png`, the latest output frame to `<file>-frame.png` and the main menu (titles, shortcuts, checkmarks) to `<file>-menu.txt`, then quits. `cacheDisplay` cannot draw the video layer, so the latest frame is drawn in its place. It also cannot draw the glass toolbar (a blank capsule) or menus.
@@ -92,7 +93,7 @@ Debug builds only. Launch arguments:
 
 ```sh
 open -n build/DerivedData/Build/Products/Debug/StyleCam.app --args \
-  -StyleCamVideoFile clip.y4m -StyleCamStyle starry_night -StyleCamSnapshot /tmp/ui.png -StyleCamSnapshotDelay 8
+  -StyleCamVideoFile "$PWD/clip.y4m" -StyleCamStyle starry_night -StyleCamSnapshot /tmp/ui.png -StyleCamSnapshotDelay 8
 ```
 
 ## Dev loop

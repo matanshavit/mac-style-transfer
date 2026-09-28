@@ -40,4 +40,4 @@ Read from obs-studio at 50530ce (2026-09). Not tested: OBS is not installed here
 
 - M5 GPU "Neural Accelerators" are reachable through Metal Performance Primitives and Metal 4 tensors. No evidence Core ML uses them for conv. [tzakharko](https://tzakharko.github.io/apple-neural-accelerators-benchmark/)
 - Use fixed input shapes per resolution for clean ANE placement. Check placement with `MLComputePlan`.
-- Vision person segmentation: use `.fast` for video.
+- Vision person segmentation: we use `.balanced` at 30 fps. Its mask is as fresh as `.fast`'s (the current frame at balanced, the previous frame at fast) and has twice the resolution.
