@@ -16,6 +16,16 @@ Condensed. Links are the sources. Dates matter: checked 2026-09.
 - Every real project with heavy processing does it in the app: aicamera, macos-cam-fx, OpenCamraHub. Hand-off cost at 1080p30 is about 11% of one core. [OpenCamraHub](https://github.com/trsdn/OpenCamraHub)
 - XcodeGen system extension embed: `copy: {destination: plugins, subpath: ../Library/SystemExtensions}`. [dautovri/SimulatorCamera](https://github.com/dautovri/SimulatorCamera)
 
+## OBS Virtual Camera
+
+Read from obs-studio at 50530ce (2026-09). Not tested: OBS is not installed here.
+
+- Device "OBS Virtual Camera" ([provider](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/camera-extension/OBSCameraProviderSource.swift#L22)), UID `7626645E-4425-469E-9D8B-97E0FA59AC75` in release builds ([CMakePresets](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/CMakePresets.json#L97)). No custom properties, so no client count.
+- Source and sink declare one format, BGRA 1920x1080 at 60 fps ([device](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/camera-extension/OBSCameraDeviceSource.swift#L53-L83)). Sink queue size 1, and `authorizedToStartStream` accepts any client ([sink](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/camera-extension/OBSCameraStreamSink.swift#L73-L92)).
+- OBS itself never sends that format. It enqueues NV12 (or I420, UYVY, P010) at its output size, PTS = its frame time in host-clock ns, no duration, and does not check for a full queue ([plugin](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/obs-plugin/plugin-main.mm#L337-L365), [enqueue](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/obs-plugin/plugin-main.mm#L535-L541)). It takes the second stream as the sink ([plugin](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/obs-plugin/plugin-main.mm#L425-L437)).
+- The extension forwards each buffer unchanged, stamped with its PTS as host time, and QuickTime and most clients follow the buffer size. Apps that force the declared size scale or crop ([device](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/camera-extension/OBSCameraDeviceSource.swift#L242-L272), [#10263](https://github.com/obsproject/obs-studio/issues/10263)). It drains the sink at 180 Hz while the sink runs, watched or not.
+- Two feeders: the last one to start the sink wins (the old consume timer is replaced). When any feeder stops, the sink stops for all and the placeholder shows ([device](https://github.com/obsproject/obs-studio/blob/50530ce9046599e698c5d2068e4f053fae2318f6/plugins/mac-virtualcam/src/camera-extension/OBSCameraDeviceSource.swift#L274-L307)).
+
 ## Models
 
 - Johnson and Magenta transformer nets cost about 154K MAC per pixel. 720p is about 283 GFLOP per frame, 8.5 TFLOPS at 30 fps.

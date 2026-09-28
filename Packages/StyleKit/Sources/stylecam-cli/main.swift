@@ -15,8 +15,9 @@ stylecam-cli \(StyleKit.version)
             --network defaults to classic; with steady, sizes without a steady model run classic
   styles    --styles <dir> --models <dir> [--json]
   devices   list CMIO video devices and their streams
-  push-test --uid <uid> [--name <fallback name>] [--seconds <n>]
-            push a moving 1280x720 420v test pattern at 30 fps into a virtual camera's sink stream
+  push-test --uid <uid> | --name <name> [--seconds <n>]
+            push a moving 1280x720 420v test pattern at 30 fps into a virtual camera's sink stream,
+            found by UID, else by name (for example --name "OBS Virtual Camera")
   version
 """
 

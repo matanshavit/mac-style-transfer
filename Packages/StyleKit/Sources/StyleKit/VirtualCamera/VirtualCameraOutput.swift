@@ -3,7 +3,6 @@ import CoreMediaIO
 import CoreVideo
 import Foundation
 import os
-import VideoToolbox
 
 /// Pushes video frames into the sink stream of a CMIO virtual camera.
 ///
@@ -23,12 +22,15 @@ public final class VirtualCameraOutput: @unchecked Sendable {
         public var sourceClientCount: Int?
     }
 
-    public let deviceUID: String
+    public let deviceUID: String?
     public let fallbackDeviceName: String?
     /// Latest state first, then every change. Supports a single consumer.
     public let stateUpdates: AsyncStream<State>
 
+    private static let stallTimeout = Duration.seconds(2)
+
     private let clientCountSelector: CMIOObjectPropertySelector?
+    private let restartsStalledSink: Bool
     private let stateContinuation: AsyncStream<State>.Continuation
     private let queue = DispatchQueue(label: "StyleKit.VirtualCameraOutput", qos: .userInitiated)
     private let lock = OSAllocatedUnfairLock()
@@ -36,7 +38,7 @@ public final class VirtualCameraOutput: @unchecked Sendable {
 
     private var currentState = State(status: .disconnected)
     private var sink: Sink?
-    private var conversion: (format: CMIODeviceDirectory.VideoFormat, converter: Converter?)?
+    private var fullSince: ContinuousClock.Instant?
     private var formatDescription: CMVideoFormatDescription?
 
     private var wantsConnection = false
@@ -44,12 +46,18 @@ public final class VirtualCameraOutput: @unchecked Sendable {
     private var clientCountTimer: DispatchSourceTimer?
     private var retryTimer: DispatchSourceTimer?
 
-    /// - Parameter clientCountSelector: four-character selector of a device property holding the
-    ///   source client count as a decimal string, such as `StyleCamIDs.sourceClientCountSelector`.
-    public init(deviceUID: String, fallbackDeviceName: String? = nil, clientCountSelector: String? = nil) {
+    /// - Parameters:
+    ///   - clientCountSelector: four-character selector of a device property holding the source client
+    ///     count as a decimal string, such as `StyleCamIDs.sourceClientCountSelector`.
+    ///   - restartsStalledSink: restarts the sink stream when its queue stays full for 2 s while frames
+    ///     are sent. Use it for sinks that drain their queue whenever the stream runs, like OBS's: there a
+    ///     full queue means another feeder took the sink over or stopped it.
+    public init(deviceUID: String?, fallbackDeviceName: String? = nil, clientCountSelector: String? = nil,
+                restartsStalledSink: Bool = false) {
         self.deviceUID = deviceUID
         self.fallbackDeviceName = fallbackDeviceName
         self.clientCountSelector = clientCountSelector.flatMap(FourCC.code)
+        self.restartsStalledSink = restartsStalledSink
         (stateUpdates, stateContinuation) = AsyncStream.makeStream(of: State.self, bufferingPolicy: .bufferingNewest(1))
         stateContinuation.yield(currentState)
     }
@@ -92,18 +100,19 @@ public final class VirtualCameraOutput: @unchecked Sendable {
 
     /// Enqueues one frame and returns whether the sink accepted it.
     ///
-    /// Drops the frame when the sink queue is full. Frames that do not match the sink's format are
-    /// converted. ICC profile, color space, primaries, transfer function and gamma attachments are
+    /// Drops the frame when the sink queue is full. Frames are sent as they are, whatever format the
+    /// sink declares. ICC profile, color space, primaries, transfer function and gamma attachments are
     /// removed from the buffer that is sent.
     @discardableResult
     public func send(_ pixelBuffer: CVPixelBuffer) -> Bool {
-        guard let target = lock.withLockUnchecked({ sink }),
-              CMSimpleQueueGetCount(target.queue) < CMSimpleQueueGetCapacity(target.queue)
-        else { return false }
+        guard let target = lock.withLockUnchecked({ sink }) else { return false }
+        guard CMSimpleQueueGetCount(target.queue) < CMSimpleQueueGetCapacity(target.queue) else {
+            if restartsStalledSink { queueWasFull(target) }
+            return false
+        }
         let prepared: CMSampleBuffer? = frameLock.withLockUnchecked {
-            guard let frame = frame(for: pixelBuffer, format: target.format) else { return nil }
-            frame.removeColorProfileAttachments()
-            return sampleBuffer(for: frame)
+            pixelBuffer.removeColorProfileAttachments()
+            return sampleBuffer(for: pixelBuffer)
         }
         guard let prepared else { return false }
 
@@ -114,16 +123,30 @@ public final class VirtualCameraOutput: @unchecked Sendable {
                 Unmanaged<CMSampleBuffer>.fromOpaque(element).release()
                 return false
             }
+            fullSince = nil
             return true
         }
     }
 
-    private func frame(for pixelBuffer: CVPixelBuffer, format: CMIODeviceDirectory.VideoFormat?) -> CVPixelBuffer? {
-        guard let format, format != CMIODeviceDirectory.VideoFormat(pixelBuffer) else { return pixelBuffer }
-        if conversion?.format != format {
-            conversion = (format, Converter(format: format))
+    private func queueWasFull(_ target: Sink) {
+        let now = ContinuousClock.now
+        let stalled = lock.withLockUnchecked {
+            guard sink?.queue === target.queue else { return false }
+            guard let since = fullSince else {
+                fullSince = now
+                return false
+            }
+            guard now - since >= Self.stallTimeout else { return false }
+            fullSince = nil
+            return true
         }
-        return conversion?.converter?.convert(pixelBuffer)
+        guard stalled else { return }
+        let stalledQueue = ObjectIdentifier(target.queue)
+        queue.async { [weak self] in
+            guard let self, lock.withLockUnchecked({ self.sink.map { ObjectIdentifier($0.queue) } == stalledQueue }) else { return }
+            teardown()
+            reconnect()
+        }
     }
 
     private func sampleBuffer(for pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
@@ -150,7 +173,7 @@ public final class VirtualCameraOutput: @unchecked Sendable {
 
     private func reconnect() {
         guard wantsConnection else { return }
-        guard let device = CMIODeviceDirectory.device(uid: deviceUID) ?? fallbackDeviceName.flatMap(CMIODeviceDirectory.device(named:)) else {
+        guard let device = deviceUID.flatMap(CMIODeviceDirectory.device(uid:)) ?? fallbackDeviceName.flatMap(CMIODeviceDirectory.device(named:)) else {
             stopRetrying()
             teardown()
             update { $0 = State(status: .notFound) }
@@ -194,7 +217,10 @@ public final class VirtualCameraOutput: @unchecked Sendable {
         clientCountTimer?.cancel()
         clientCountTimer = nil
         let stopped = lock.withLockUnchecked {
-            defer { sink = nil }
+            defer {
+                sink = nil
+                fullSince = nil
+            }
             return sink
         }
         stopped?.stop()
@@ -267,7 +293,6 @@ private struct Sink {
     let deviceID: CMIOObjectID
     let streamID: CMIOStreamID
     let queue: CMSimpleQueue
-    let format: CMIODeviceDirectory.VideoFormat?
 
     static func start(deviceID: CMIOObjectID, stream: CMIODeviceDirectory.Stream) -> Result<Sink, StartError> {
         var queue: Unmanaged<CMSimpleQueue>?
@@ -280,7 +305,7 @@ private struct Sink {
             unregisterQueueCallback(stream.id)
             return .failure(StartError(message: "CMIODeviceStartStream failed (\(startStatus))"))
         }
-        return .success(Sink(deviceID: deviceID, streamID: stream.id, queue: queue, format: stream.format))
+        return .success(Sink(deviceID: deviceID, streamID: stream.id, queue: queue))
     }
 
     func stop() {
@@ -293,42 +318,6 @@ private struct Sink {
         if CMIOStreamCopyBufferQueue(streamID, nil, nil, &queue) == noErr {
             queue?.release()
         }
-    }
-}
-
-private final class Converter {
-    private let session: VTPixelTransferSession
-    private let pool: CVPixelBufferPool
-    private let allocationAttributes = [kCVPixelBufferPoolAllocationThresholdKey: 4] as CFDictionary
-
-    init?(format: CMIODeviceDirectory.VideoFormat) {
-        let attributes = [
-            kCVPixelBufferWidthKey: Int(format.width),
-            kCVPixelBufferHeightKey: Int(format.height),
-            kCVPixelBufferPixelFormatTypeKey: format.pixelFormat,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-        ] as CFDictionary
-        var session: VTPixelTransferSession?
-        var pool: CVPixelBufferPool?
-        guard VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &session) == noErr, let session,
-              CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes, &pool) == kCVReturnSuccess, let pool
-        else { return nil }
-        VTSessionSetProperty(session, key: kVTPixelTransferPropertyKey_ScalingMode, value: kVTScalingMode_Trim)
-        self.session = session
-        self.pool = pool
-    }
-
-    deinit {
-        VTPixelTransferSessionInvalidate(session)
-    }
-
-    func convert(_ source: CVPixelBuffer) -> CVPixelBuffer? {
-        var destination: CVPixelBuffer?
-        guard CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, pool, allocationAttributes, &destination) == kCVReturnSuccess,
-              let destination,
-              VTPixelTransferSessionTransferImage(session, from: source, to: destination) == noErr
-        else { return nil }
-        return destination
     }
 }
 

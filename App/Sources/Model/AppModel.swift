@@ -64,9 +64,11 @@ final class AppModel {
 
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private let pipeline: StylePipeline?
-    @ObservationIgnored private let camera = CameraCapture(excludedDeviceUIDs: [StyleCamIDs.deviceUID])
-    @ObservationIgnored private let virtualCameraOutput = VirtualCameraOutput(
+    @ObservationIgnored private let camera = CameraCapture(excludedDeviceUIDs: [StyleCamIDs.deviceUID, OBSVirtualCamera.deviceUID])
+    @ObservationIgnored private let styleCamOutput = VirtualCameraOutput(
         deviceUID: StyleCamIDs.deviceUID, clientCountSelector: StyleCamIDs.sourceClientCountSelector)
+    @ObservationIgnored private let obsOutput = VirtualCameraOutput(
+        deviceUID: OBSVirtualCamera.deviceUID, fallbackDeviceName: OBSVirtualCamera.deviceName, restartsStalledSink: true)
     @ObservationIgnored private let awaitingFirstFrame = OSAllocatedUnfairLock(initialState: false)
     @ObservationIgnored private let logger = Logger(subsystem: "com.matanshavit.StyleCam", category: "app")
     @ObservationIgnored private var videoSource: Y4MFileSource?
@@ -87,6 +89,7 @@ final class AppModel {
         var preferences = defaults.map(Preferences.init(defaults:)) ?? Preferences()
         if let styleID = DebugHooks.styleID { preferences.styleID = styleID }
         if DebugHooks.showsStats { preferences.showStats = true }
+        if let target = DebugHooks.virtualCameraTarget { preferences.virtualCameraTarget = target }
         self.preferences = preferences
         #else
         source = .camera
@@ -94,7 +97,7 @@ final class AppModel {
         preferences = Preferences(defaults: .standard)
         #endif
         cameraAuthorization = source == .camera ? Self.currentCameraAuthorization : .authorized
-        virtualCamera = virtualCameraOutput.state
+        virtualCamera = (preferences.virtualCameraTarget == .obs ? obsOutput : styleCamOutput).state
         let modelStore = ModelStore(locations: [.bundle(.main)])
         steadySizes = modelStore.availableTransformerSizes(for: .steady)
         do {
@@ -113,6 +116,16 @@ final class AppModel {
     /// Classic when the build has no steady models, whatever the preference.
     var network: StyleNetwork {
         steadySizes.isEmpty ? .classic : preferences.network
+    }
+
+    /// OBS's device has no client count, so the camera stays on while StyleCam is connected to it.
+    private var keepsCameraOnForOBS: Bool {
+        guard preferences.virtualCameraTarget == .obs, case .connected = virtualCamera.status else { return false }
+        return true
+    }
+
+    private var virtualCameraOutput: VirtualCameraOutput {
+        preferences.virtualCameraTarget == .obs ? obsOutput : styleCamOutput
     }
 
     var selectedStyle: StyleInfo? {
@@ -321,7 +334,7 @@ final class AppModel {
     }
 
     private var needsCapture: Bool {
-        isMainWindowVisible || (virtualCamera.sourceClientCount ?? 0) > 0
+        isMainWindowVisible || (virtualCamera.sourceClientCount ?? 0) > 0 || keepsCameraOnForOBS
     }
 
     private func updateCapture() {
@@ -482,7 +495,8 @@ final class AppModel {
 
     private func startObserving() {
         guard let pipeline else { return }
-        pipeline.addOutput(virtualCameraOutput)
+        pipeline.addOutput(styleCamOutput)
+        pipeline.addOutput(obsOutput)
         pipeline.onFrame = { [weak self, awaitingFirstFrame] _ in
             let first = awaitingFirstFrame.withLock { waiting in
                 defer { waiting = false }
@@ -496,11 +510,14 @@ final class AppModel {
                 if captureState == .running { self.stats = stats }
             }
         }
-        Task { [weak self, virtualCameraOutput] in
-            for await state in virtualCameraOutput.stateUpdates {
-                guard let self else { return }
-                virtualCamera = state
-                updateCapture()
+        for output in [styleCamOutput, obsOutput] {
+            Task { [weak self] in
+                for await state in output.stateUpdates {
+                    guard let self else { return }
+                    guard output === virtualCameraOutput else { continue }
+                    virtualCamera = state
+                    updateCapture()
+                }
             }
         }
         if source == .camera {
@@ -556,6 +573,12 @@ final class AppModel {
             resolveStyle()
         } else {
             applyPipelineSettings()
+        }
+        if preferences.virtualCameraTarget != old.virtualCameraTarget {
+            (virtualCameraOutput === obsOutput ? styleCamOutput : obsOutput).disconnect()
+            virtualCameraOutput.connect()
+            virtualCamera = virtualCameraOutput.state
+            updateCapture()
         }
         if preferences.cameraID != old.cameraID, source == .camera {
             switch captureState {

@@ -1,5 +1,6 @@
 import CoreMedia
 import CoreMediaIO
+import Foundation
 
 public enum CMIODeviceDirectory {
     public struct Device: Sendable, Hashable, Identifiable {
@@ -37,14 +38,6 @@ public enum CMIODeviceDirectory {
             self.width = width
             self.height = height
         }
-
-        public init(_ pixelBuffer: CVPixelBuffer) {
-            self.init(
-                pixelFormat: CVPixelBufferGetPixelFormatType(pixelBuffer),
-                width: Int32(CVPixelBufferGetWidth(pixelBuffer)),
-                height: Int32(CVPixelBufferGetHeight(pixelBuffer))
-            )
-        }
     }
 
     public static func devices() -> [Device] {
@@ -52,7 +45,7 @@ public enum CMIODeviceDirectory {
     }
 
     public static func device(uid: String) -> Device? {
-        devices().first { $0.uid == uid }
+        devices().first { $0.uid.caseInsensitiveCompare(uid) == .orderedSame }
     }
 
     public static func device(named name: String) -> Device? {

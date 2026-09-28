@@ -5,32 +5,40 @@ import SwiftUI
 struct VirtualCameraStatus {
     let title: String
     let color: Color
-    let isInstalled: Bool
 
     @MainActor
     init(model: AppModel) {
         let clients = model.virtualCamera.sourceClientCount ?? 0
-        if case .connected = model.virtualCamera.status {
-            isInstalled = true
-            color = .green
-            title = clients == 0 ? "Ready" : "In use by \(clients) \(clients == 1 ? "app" : "apps")"
-            return
-        }
-        isInstalled = model.extensionManager.state == .activated
-        (title, color) = switch model.extensionManager.state {
-        case .activated: ("Installed", .green)
-        case .idle, .requiresApplicationsFolder: ("Not installed", .gray)
-        case .needsApproval: ("Waiting for approval", .orange)
-        case .needsReboot: ("Restart needed", .orange)
-        case .failed: ("Install failed", .red)
+        switch (model.preferences.virtualCameraTarget, model.virtualCamera.status) {
+        case (.obs, .connected):
+            (title, color) = ("Connected to OBS", .green)
+        case (.obs, .error):
+            (title, color) = ("Can’t connect to OBS", .red)
+        case (.obs, _):
+            (title, color) = ("OBS not found", .gray)
+        case (.styleCam, .connected):
+            (title, color) = (clients == 0 ? "Ready" : "In use by \(clients) \(clients == 1 ? "app" : "apps")", .green)
+        case (.styleCam, _):
+            (title, color) = switch model.extensionManager.state {
+            case .activated: ("Installed", .green)
+            case .idle, .requiresApplicationsFolder: ("Not installed", .gray)
+            case .needsApproval: ("Waiting for approval", .orange)
+            case .needsReboot: ("Restart needed", .orange)
+            case .failed: ("Install failed", .red)
+            }
         }
     }
 }
 
 struct VirtualCameraSection: View {
-    let model: AppModel
+    @Bindable var model: AppModel
 
     private var manager: ExtensionManager { model.extensionManager }
+
+    private var isConnected: Bool {
+        if case .connected = model.virtualCamera.status { return true }
+        return false
+    }
 
     private var canInstall: Bool {
         manager.state != .requiresApplicationsFolder && ExtensionManager.hasDeveloperTeam
@@ -39,33 +47,73 @@ struct VirtualCameraSection: View {
     var body: some View {
         let status = VirtualCameraStatus(model: model)
         Section("Virtual Camera") {
+            Picker("Output", selection: $model.preferences.virtualCameraTarget) {
+                Text("StyleCam camera").tag(VirtualCameraTarget.styleCam)
+                Text("OBS (experimental)").tag(VirtualCameraTarget.obs)
+            }
             LabeledContent("Status") {
                 HStack(spacing: 6) {
                     Circle().fill(status.color).frame(width: 8, height: 8)
                     Text(status.title)
                 }
             }
-            ForEach(messages(status), id: \.self) { message in
+            ForEach(messages, id: \.self) { message in
                 Text(message)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if status.isInstalled {
-                Button("Uninstall") { manager.uninstall() }
-            } else if manager.state == .needsApproval {
-                Button("Open System Settings") {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
+            switch model.preferences.virtualCameraTarget {
+            case .obs:
+                if !isConnected {
+                    Link("Download OBS", destination: OBSVirtualCamera.downloadURL)
                 }
-            } else if manager.state != .needsReboot {
-                Button("Install") { manager.install() }
-                    .disabled(!canInstall)
+            case .styleCam:
+                if isConnected || manager.state == .activated {
+                    Button("Uninstall") { manager.uninstall() }
+                } else if manager.state == .needsApproval {
+                    Button("Open System Settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
+                    }
+                } else if manager.state != .needsReboot {
+                    Button("Install") { manager.install() }
+                        .disabled(!canInstall)
+                }
             }
         }
     }
 
-    private func messages(_ status: VirtualCameraStatus) -> [String] {
-        if case .connected = model.virtualCamera.status {
+    private var messages: [String] {
+        switch model.preferences.virtualCameraTarget {
+        case .obs: obsMessages
+        case .styleCam: styleCamMessages
+        }
+    }
+
+    private var obsMessages: [String] {
+        switch model.virtualCamera.status {
+        case .connected:
+            [
+                "Sending to OBS Virtual Camera. The camera stays on while this is selected, even with the window closed.",
+                "Choose “\(OBSVirtualCamera.deviceName)” in Zoom, Meet or FaceTime. Keep the virtual camera in OBS stopped.",
+            ]
+        case .error(let error):
+            [error]
+        case .notFound, .disconnected:
+            [
+                "Sends the video to OBS Virtual Camera, which works without StyleCam’s own camera. To set it up:",
+                """
+                1. Install OBS Studio in the Applications folder.
+                2. Open OBS and click Start Virtual Camera.
+                3. Allow OBS in System Settings > General > Login Items & Extensions > Camera Extensions.
+                4. Quit OBS. StyleCam connects by itself.
+                """,
+            ]
+        }
+    }
+
+    private var styleCamMessages: [String] {
+        if isConnected {
             return model.virtualCamera.sourceClientCount ?? 0 > 0
                 ? []
                 : ["Choose “\(StyleCamIDs.deviceName)” as the camera in Zoom, Meet or FaceTime."]
@@ -94,6 +142,7 @@ struct VirtualCameraSection: View {
                 #else
                 messages.append("This copy of StyleCam is not signed by a developer, so macOS will not install the camera.")
                 #endif
+                messages.append("Without it, you can send the video to OBS Virtual Camera instead.")
             }
             return messages
         }

@@ -9,7 +9,8 @@ import UniformTypeIdentifiers
 /// Launch arguments for checking the app without a camera or screen recording:
 /// `-StyleCamVideoFile <file.y4m>` plays a video instead of the camera, `-StyleCamStyle <id>`, `-StyleCamShowStats YES`,
 /// `-StyleCamWindowSize <W>x<H>`, `-StyleCamCameraAccess notDetermined|denied` pretends the camera permission is in
-/// that state (and never opens the camera), and `-StyleCamSnapshot <file.png> [-StyleCamSnapshotDelay <seconds>]` writes
+/// that state (and never opens the camera), `-StyleCamVirtualCameraOutput stylecam|obs` picks the virtual camera output,
+/// and `-StyleCamSnapshot <file.png> [-StyleCamSnapshotDelay <seconds>]` writes
 /// the window, the latest output frame and the main menu, then quits. Any of them keeps the saved settings untouched.
 enum DebugHooks {
     private static var arguments: [String: Any] {
@@ -43,6 +44,10 @@ enum DebugHooks {
         case "denied": .denied
         default: nil
         }
+    }
+
+    static var virtualCameraTarget: VirtualCameraTarget? {
+        string("StyleCamVirtualCameraOutput").flatMap(VirtualCameraTarget.init(rawValue:))
     }
 
     static var snapshotURL: URL? {

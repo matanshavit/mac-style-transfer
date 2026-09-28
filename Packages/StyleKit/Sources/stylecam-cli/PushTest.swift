@@ -2,8 +2,9 @@ import Foundation
 import StyleKit
 
 func pushTest(_ arguments: Arguments) throws -> Int32 {
-    let uid = try arguments.required("uid")
+    let uid = arguments.string("uid")
     let name = arguments.string("name")
+    guard uid != nil || name != nil else { throw UsageError(description: "push-test needs --uid or --name") }
     let seconds = try arguments.positiveNumber("seconds") ?? 10
     let frameRate = 30
     guard let frameCount = Int(exactly: (seconds * Double(frameRate)).rounded()) else {
@@ -22,8 +23,8 @@ func pushTest(_ arguments: Arguments) throws -> Int32 {
         printError("Could not connect to the camera: \(message)")
         return EXIT_FAILURE
     case .notFound, .disconnected:
-        let lookup = name.map { "UID \(uid) or name \"\($0)\"" } ?? "UID \(uid)"
-        printError("No camera found with \(lookup). Install the StyleCam camera extension, or run 'stylecam-cli devices' to list cameras.")
+        let lookup = [uid.map { "UID \($0)" }, name.map { "name \"\($0)\"" }].compactMap(\.self).joined(separator: " or ")
+        printError("No camera found with \(lookup). Run 'stylecam-cli devices' to list cameras.")
         return EXIT_FAILURE
     }
 

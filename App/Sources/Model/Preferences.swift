@@ -1,6 +1,11 @@
 import Foundation
 import StyleKit
 
+enum VirtualCameraTarget: String {
+    case styleCam = "stylecam"
+    case obs
+}
+
 struct Preferences: Equatable {
     static let originalStyleID = "original"
 
@@ -19,6 +24,7 @@ struct Preferences: Equatable {
     var mirrorPreview = true
     var showStats = false
     var showsControls = true
+    var virtualCameraTarget = VirtualCameraTarget.styleCam
 
     var isStylized: Bool { styleID != Self.originalStyleID }
 }
@@ -38,6 +44,7 @@ extension Preferences {
         static let mirrorPreview = "mirrorPreview"
         static let showStats = "showStats"
         static let showsControls = "showsControls"
+        static let virtualCameraTarget = "virtualCameraTarget"
     }
 
     init(defaults: UserDefaults) {
@@ -55,6 +62,8 @@ extension Preferences {
         mirrorPreview = defaults.object(forKey: Key.mirrorPreview) as? Bool ?? mirrorPreview
         showStats = defaults.object(forKey: Key.showStats) as? Bool ?? showStats
         showsControls = defaults.object(forKey: Key.showsControls) as? Bool ?? showsControls
+        virtualCameraTarget = defaults.string(forKey: Key.virtualCameraTarget).flatMap(VirtualCameraTarget.init(rawValue:))
+            ?? virtualCameraTarget
     }
 
     func save(to defaults: UserDefaults) {
@@ -71,5 +80,6 @@ extension Preferences {
         defaults.set(mirrorPreview, forKey: Key.mirrorPreview)
         defaults.set(showStats, forKey: Key.showStats)
         defaults.set(showsControls, forKey: Key.showsControls)
+        defaults.set(virtualCameraTarget.rawValue, forKey: Key.virtualCameraTarget)
     }
 }
