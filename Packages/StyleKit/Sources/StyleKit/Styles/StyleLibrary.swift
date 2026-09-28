@@ -135,11 +135,14 @@ public actor StyleLibrary {
         return image
     }
 
+    /// Oldest first, the order `addCustomStyle` appends them in.
     private static func loadCustomStyles(from directory: URL) -> [StyleInfo] {
-        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        let key = URLResourceKey.creationDateKey
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [key])) ?? []
         return files.filter { $0.pathExtension == "json" }
-            .compactMap { try? JSONDecoder().decode(StyleInfo.self, from: Data(contentsOf: $0)) }
-            .sorted { $0.id < $1.id }
+            .map { file in (file: file, created: (try? file.resourceValues(forKeys: [key]).creationDate) ?? .distantPast) }
+            .sorted { $0.created < $1.created }
+            .compactMap { try? JSONDecoder().decode(StyleInfo.self, from: Data(contentsOf: $0.file)) }
     }
 
     private static func limited(_ image: CGImage) -> CGImage {
