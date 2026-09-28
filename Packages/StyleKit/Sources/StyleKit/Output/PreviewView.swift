@@ -8,6 +8,7 @@ public final class PreviewOutput: FrameOutput, @unchecked Sendable {
     @MainActor public let displayLayer: AVSampleBufferDisplayLayer
     private let renderer: AVSampleBufferVideoRenderer
     private let queue = DispatchQueue(label: "StyleKit.PreviewOutput", qos: .userInteractive)
+    private var isCleared = false
 
     @MainActor public init() {
         let layer = AVSampleBufferDisplayLayer()
@@ -17,16 +18,44 @@ public final class PreviewOutput: FrameOutput, @unchecked Sendable {
     }
 
     public func publish(_ pixelBuffer: CVPixelBuffer, time: CMTime) {
-        guard let sample = CMSampleBuffer.make(imageBuffer: pixelBuffer, time: time, displayImmediately: true) else { return }
+        guard let sample = Self.sampleBuffer(pixelBuffer, time: time) else { return }
         let box = UncheckedBox(sample)
         queue.async { [self] in
+            guard !isCleared else { return }
             if renderer.status == .failed || renderer.requiresFlushToResumeDecoding { renderer.flush() }
             renderer.enqueue(box.value)
         }
     }
 
+    /// Removes the frame on screen and ignores frames published after it, including frames still in the pipeline,
+    /// until `resume()`.
     public func clear() {
-        queue.async { [self] in renderer.flush(removingDisplayedImage: true, completionHandler: nil) }
+        queue.async { [self] in
+            isCleared = true
+            renderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        }
+    }
+
+    public func resume() {
+        queue.async { [self] in isCleared = false }
+    }
+
+    private static func sampleBuffer(_ imageBuffer: CVPixelBuffer, time: CMTime) -> CMSampleBuffer? {
+        var format: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: imageBuffer,
+                                                           formatDescriptionOut: &format) == noErr, let format else { return nil }
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: time, decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: imageBuffer, formatDescription: format,
+                                                       sampleTiming: &timing, sampleBufferOut: &sample) == noErr,
+              let sample else { return nil }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
+           CFArrayGetCount(attachments) > 0 {
+            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+        }
+        return sample
     }
 }
 

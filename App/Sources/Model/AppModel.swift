@@ -412,10 +412,12 @@ final class AppModel {
         pipeline?.stop()
         preview.clear()
         captureState = .failed(message)
+        stats = nil
     }
 
     private func waitForFirstFrame() {
         awaitingFirstFrame.withLock { $0 = true }
+        preview.resume()
         captureState = .starting
         startTimeoutTask?.cancel()
         startTimeoutTask = Task { [weak self] in
@@ -439,6 +441,7 @@ final class AppModel {
             startTimeoutTask?.cancel()
             preview.clear()
             captureState = .interrupted
+            stats = nil
         case (.interruptionEnded, .interrupted):
             waitForFirstFrame()
         default:
@@ -450,6 +453,7 @@ final class AppModel {
         guard let pipeline, isPreviewAttached != isMainWindowVisible else { return }
         isPreviewAttached = isMainWindowVisible
         if isMainWindowVisible {
+            preview.resume()
             pipeline.addOutput(preview)
         } else {
             pipeline.removeOutput(preview)
