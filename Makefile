@@ -1,6 +1,7 @@
 DERIVED := build/DerivedData
 APP := $(DERIVED)/Build/Products/Debug/StyleCam.app
 RELEASE_APP := $(DERIVED)/Build/Products/Release/StyleCam.app
+LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 VIDEO ?= data/video/Johnny_1280x720_60.y4m
 STYLE ?=
 
@@ -18,10 +19,12 @@ build-signed: generate
 	xcodebuild -project StyleCam.xcodeproj -scheme StyleCam -configuration Release \
 		-derivedDataPath $(DERIVED) -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
 
-# macOS only activates the camera extension from an app in /Applications.
+# macOS only activates the camera extension from an app in /Applications, and it finds the
+# extension by identifier, so build copies registered with LaunchServices must be removed.
 install: build-signed
 	rm -rf /Applications/StyleCam.app
 	ditto $(RELEASE_APP) /Applications/StyleCam.app
+	-$(LSREGISTER) -u $(RELEASE_APP) $(APP)
 
 # Plays a y4m video instead of the camera, so it needs no camera permission.
 run-demo: build
