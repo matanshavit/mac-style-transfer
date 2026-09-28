@@ -12,7 +12,8 @@ Things I cannot do or decide alone. Most important first.
    - Quit OBS.
    - Quick check, with StyleCam quit: `make cli`, then `Packages/StyleKit/.build/release/stylecam-cli push-test --name "OBS Virtual Camera" --seconds 30`, and open Photo Booth or Zoom with OBS Virtual Camera. You should see a moving bar and a frame counter.
    - Run StyleCam (`make build`, then `open build/DerivedData/Build/Products/Debug/StyleCam.app`), allow the camera, and set Virtual Camera > Output to OBS. The status should say Connected to OBS. Choose OBS Virtual Camera in Zoom.
-   - Send me what you see (video, OBS placeholder or black) and the push-test output.
+   - Open OBS. StyleCam should say OBS is open, and Start Virtual Camera in OBS should show OBS's video in Zoom. Quit OBS, and StyleCam's video should come back.
+   - Send me what you see at each step (video, OBS placeholder or black) and the push-test output.
 3. **Camera permission.** The first run shows a macOS camera prompt. Only you can click it.
 4. **Extension approval.** The first install asks you to allow the extension in System Settings > General > Login Items & Extensions > Camera Extensions.
 5. **Copyrighted styles.** Christina's World (Wyeth, died 2009) and O'Keeffe's "Music, Pink and Blue No. 2" (from the old app) are still under copyright in many places. I left them out of the repo. The app can still load them from a URL at runtime, like the old app did. OK?

@@ -12,6 +12,8 @@ struct VirtualCameraStatus {
         switch (model.preferences.virtualCameraTarget, model.virtualCamera.status) {
         case (.obs, .connected):
             (title, color) = ("Connected to OBS", .green)
+        case (.obs, .busy):
+            (title, color) = ("OBS is open", .orange)
         case (.obs, .error):
             (title, color) = ("Can’t connect to OBS", .red)
         case (.obs, _):
@@ -40,6 +42,10 @@ struct VirtualCameraSection: View {
         return false
     }
 
+    private var isOBSMissing: Bool {
+        [.notFound, .disconnected].contains(model.virtualCamera.status)
+    }
+
     private var canInstall: Bool {
         manager.state != .requiresApplicationsFolder && ExtensionManager.hasDeveloperTeam
     }
@@ -65,7 +71,7 @@ struct VirtualCameraSection: View {
             }
             switch model.preferences.virtualCameraTarget {
             case .obs:
-                if !isConnected {
+                if isOBSMissing {
                     Link("Download OBS", destination: OBSVirtualCamera.downloadURL)
                 }
             case .styleCam:
@@ -95,8 +101,10 @@ struct VirtualCameraSection: View {
         case .connected:
             [
                 "Sending to OBS Virtual Camera. The camera stays on while this is selected, even with the window closed.",
-                "Choose “\(OBSVirtualCamera.deviceName)” in Zoom, Meet or FaceTime. Keep the virtual camera in OBS stopped.",
+                "Choose “\(OBSVirtualCamera.deviceName)” in Zoom, Meet or FaceTime. While OBS is open, StyleCam leaves its camera to OBS.",
             ]
+        case .busy:
+            ["StyleCam leaves OBS Virtual Camera to OBS while OBS is open. Quit OBS to send this video there."]
         case .error(let error):
             [error]
         case .notFound, .disconnected:
@@ -106,7 +114,7 @@ struct VirtualCameraSection: View {
                 1. Install OBS Studio in the Applications folder.
                 2. Open OBS and click Start Virtual Camera.
                 3. Allow OBS in System Settings > General > Login Items & Extensions > Camera Extensions.
-                4. Quit OBS. StyleCam connects by itself.
+                4. Quit OBS. StyleCam connects by itself, then keeps the camera on, even with the window closed.
                 """,
             ]
         }

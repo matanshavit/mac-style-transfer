@@ -54,7 +54,9 @@ final class AppModel {
     private(set) var isLibraryLoaded = false
     private(set) var cameras: [CameraDevice] = []
     private(set) var cameraAuthorization: AVAuthorizationStatus
-    private(set) var captureState = CaptureState.stopped
+    private(set) var captureState = CaptureState.stopped {
+        didSet { obsOutput.holdsSink = captureState == .running }
+    }
     private(set) var stats: PipelineStats?
     private(set) var virtualCamera: VirtualCameraOutput.State
     private(set) var setupError: String?
@@ -68,7 +70,8 @@ final class AppModel {
     @ObservationIgnored private let styleCamOutput = VirtualCameraOutput(
         deviceUID: StyleCamIDs.deviceUID, clientCountSelector: StyleCamIDs.sourceClientCountSelector)
     @ObservationIgnored private let obsOutput = VirtualCameraOutput(
-        deviceUID: OBSVirtualCamera.deviceUID, fallbackDeviceName: OBSVirtualCamera.deviceName, restartsStalledSink: true)
+        deviceUID: OBSVirtualCamera.deviceUID, fallbackDeviceName: OBSVirtualCamera.deviceName,
+        yieldsWhile: { OBSVirtualCamera.isAppRunning })
     @ObservationIgnored private let awaitingFirstFrame = OSAllocatedUnfairLock(initialState: false)
     @ObservationIgnored private let logger = Logger(subsystem: "com.matanshavit.StyleCam", category: "app")
     @ObservationIgnored private var videoSource: Y4MFileSource?
@@ -109,6 +112,7 @@ final class AppModel {
         applyPipelineSettings()
         startObserving()
         loadTask = Task { await load() }
+        obsOutput.holdsSink = false
         virtualCameraOutput.connect()
         extensionManager.refresh()
     }
@@ -126,6 +130,11 @@ final class AppModel {
 
     private var virtualCameraOutput: VirtualCameraOutput {
         preferences.virtualCameraTarget == .obs ? obsOutput : styleCamOutput
+    }
+
+    /// Stops the sink before quitting rather than relying on macOS to stop it for an app that exited.
+    func disconnectVirtualCamera() {
+        virtualCameraOutput.disconnect()
     }
 
     var selectedStyle: StyleInfo? {
@@ -528,6 +537,18 @@ final class AppModel {
         observers += [NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshCameraAuthorization() }
         }]
+        observers += [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification].map { name in
+            NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                guard app?.bundleIdentifier == OBSVirtualCamera.appBundleID else { return }
+                MainActor.assumeIsolated { self?.obsAppChanged() }
+            }
+        }
+    }
+
+    private func obsAppChanged() {
+        guard preferences.virtualCameraTarget == .obs else { return }
+        obsOutput.connect()
     }
 
     /// Access can change in System Settings while the app runs.

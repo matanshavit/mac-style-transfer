@@ -50,4 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
         return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppModel.shared.disconnectVirtualCamera()
+    }
 }

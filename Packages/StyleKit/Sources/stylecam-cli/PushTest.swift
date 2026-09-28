@@ -22,6 +22,9 @@ func pushTest(_ arguments: Arguments) throws -> Int32 {
     case .error(let message):
         printError("Could not connect to the camera: \(message)")
         return EXIT_FAILURE
+    case .busy:
+        printError("Could not connect to the camera: another app is sending to it.")
+        return EXIT_FAILURE
     case .notFound, .disconnected:
         let lookup = [uid.map { "UID \($0)" }, name.map { "name \"\($0)\"" }].compactMap(\.self).joined(separator: " or ")
         printError("No camera found with \(lookup). Run 'stylecam-cli devices' to list cameras.")

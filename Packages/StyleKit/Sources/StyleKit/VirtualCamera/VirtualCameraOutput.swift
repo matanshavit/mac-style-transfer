@@ -12,6 +12,8 @@ public final class VirtualCameraOutput: @unchecked Sendable {
     public enum Status: Sendable, Equatable {
         case disconnected
         case notFound
+        /// Found, but another app feeds it (see `yieldsWhile`).
+        case busy
         case connected(deviceName: String)
         case error(String)
     }
@@ -30,7 +32,7 @@ public final class VirtualCameraOutput: @unchecked Sendable {
     private static let stallTimeout = Duration.seconds(2)
 
     private let clientCountSelector: CMIOObjectPropertySelector?
-    private let restartsStalledSink: Bool
+    private let otherFeederIsActive: (@Sendable () -> Bool)?
     private let stateContinuation: AsyncStream<State>.Continuation
     private let queue = DispatchQueue(label: "StyleKit.VirtualCameraOutput", qos: .userInitiated)
     private let lock = OSAllocatedUnfairLock()
@@ -38,6 +40,7 @@ public final class VirtualCameraOutput: @unchecked Sendable {
 
     private var currentState = State(status: .disconnected)
     private var sink: Sink?
+    private var wantsSink = true
     private var fullSince: ContinuousClock.Instant?
     private var formatDescription: CMVideoFormatDescription?
 
@@ -49,15 +52,16 @@ public final class VirtualCameraOutput: @unchecked Sendable {
     /// - Parameters:
     ///   - clientCountSelector: four-character selector of a device property holding the source client
     ///     count as a decimal string, such as `StyleCamIDs.sourceClientCountSelector`.
-    ///   - restartsStalledSink: restarts the sink stream when its queue stays full for 2 s while frames
-    ///     are sent. Use it for sinks that drain their queue whenever the stream runs, like OBS's: there a
-    ///     full queue means another feeder took the sink over or stopped it.
+    ///   - yieldsWhile: for a sink that another app feeds too, like OBS's. There the last app to start the
+    ///     sink gets it, and any app that stops it stops it for all. While this returns true, the output
+    ///     leaves the sink to the other app and reports `.busy`. Otherwise a sink whose queue stays full for
+    ///     2 s while frames are sent was taken over or stopped by another feeder, and is restarted.
     public init(deviceUID: String?, fallbackDeviceName: String? = nil, clientCountSelector: String? = nil,
-                restartsStalledSink: Bool = false) {
+                yieldsWhile otherFeederIsActive: (@Sendable () -> Bool)? = nil) {
         self.deviceUID = deviceUID
         self.fallbackDeviceName = fallbackDeviceName
         self.clientCountSelector = clientCountSelector.flatMap(FourCC.code)
-        self.restartsStalledSink = restartsStalledSink
+        self.otherFeederIsActive = otherFeederIsActive
         (stateUpdates, stateContinuation) = AsyncStream.makeStream(of: State.self, bufferingPolicy: .bufferingNewest(1))
         stateContinuation.yield(currentState)
     }
@@ -74,8 +78,21 @@ public final class VirtualCameraOutput: @unchecked Sendable {
         lock.withLockUnchecked { currentState }
     }
 
+    /// Whether the sink stream runs while connected. Off, the output still follows the device and
+    /// reports it as connected (or the last start error), but leaves the sink stopped and drops frames.
+    public var holdsSink: Bool {
+        get { lock.withLockUnchecked { wantsSink } }
+        set {
+            let changed = lock.withLockUnchecked {
+                defer { wantsSink = newValue }
+                return wantsSink != newValue
+            }
+            if changed { queue.async { [weak self] in self?.reconnect() } }
+        }
+    }
+
     /// Connects now and keeps reconnecting as the device list changes, and every few seconds after
-    /// a failed start, until `disconnect()`.
+    /// a failed start, until `disconnect()`. Calling it again checks again now.
     @discardableResult
     public func connect() -> Status {
         dispatchPrecondition(condition: .notOnQueue(queue))
@@ -107,7 +124,7 @@ public final class VirtualCameraOutput: @unchecked Sendable {
     public func send(_ pixelBuffer: CVPixelBuffer) -> Bool {
         guard let target = lock.withLockUnchecked({ sink }) else { return false }
         guard CMSimpleQueueGetCount(target.queue) < CMSimpleQueueGetCapacity(target.queue) else {
-            if restartsStalledSink { queueWasFull(target) }
+            if otherFeederIsActive != nil { queueWasFull(target) }
             return false
         }
         let prepared: CMSampleBuffer? = frameLock.withLockUnchecked {
@@ -174,9 +191,18 @@ public final class VirtualCameraOutput: @unchecked Sendable {
     private func reconnect() {
         guard wantsConnection else { return }
         guard let device = deviceUID.flatMap(CMIODeviceDirectory.device(uid:)) ?? fallbackDeviceName.flatMap(CMIODeviceDirectory.device(named:)) else {
-            stopRetrying()
-            teardown()
-            update { $0 = State(status: .notFound) }
+            release { $0 = State(status: .notFound) }
+            return
+        }
+        if otherFeederIsActive?() == true {
+            release { $0 = State(status: .busy) }
+            return
+        }
+        guard lock.withLockUnchecked({ wantsSink }) else {
+            release { state in
+                if case .error = state.status { return }
+                state = State(status: .connected(deviceName: device.name))
+            }
             return
         }
         if lock.withLockUnchecked({ sink?.deviceID == device.id }) { return }
@@ -196,6 +222,12 @@ public final class VirtualCameraOutput: @unchecked Sendable {
         case .failure(let error):
             fail(error.message)
         }
+    }
+
+    private func release(_ change: (inout State) -> Void) {
+        stopRetrying()
+        teardown()
+        update(change)
     }
 
     private func fail(_ message: String) {
