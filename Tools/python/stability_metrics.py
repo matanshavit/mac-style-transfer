@@ -1,24 +1,33 @@
-"""Temporal stability and style fidelity of a style transformer.
+"""Temporal stability and style fidelity of a style transformer. Diffs are on a 0-255 scale.
 
-  shift   motion-compensated mean abs output diff (0-255) after moving the input by 0.5..8 px
+  shift   motion-compensated mean abs output diff after moving the input by 1, 2, 3, 4 and 8 px.
+          The outputs for all 16 shifts of 0-3 px in x and y, aligned and averaged, are the
+          position-stable part M of the output; re-roll is the mean distance to M.
   noise   output diff / input diff for gaussian input noise, per pixel and smooth (drawn at 1/4
-          resolution and upsampled, closer to camera noise after demosaic and compression)
-  video   frame-to-frame luma change, output / input, on two 720p talking-head clips at 960x540,
-          over all pixels and over the static background only (flicker without real motion)
-  style   VGG16 Gram distance to the painting, relu3_3 distance to the input, texture (mean abs
-          Laplacian of luma, 0-255), and distance to the shipped model's output. The input itself
-          is printed as the no-style end of the Gram and texture scales.
+          resolution and upsampled), on COCO crops
+  bands   luma energy of the output and of M: top octave (mean abs Laplacian), mid (DoG sigma
+          1-3), low (DoG sigma 3-8), and luma std. The top octave of the output alone includes
+          the re-roll, so compare M.
+  style   VGG16 Gram distance to the painting and to the shipped model's output, relu3_3 distance
+          to the input and to the shipped output, and sigma 2 low-pass distance to the shipped
+          output (layout and tone drift). The input is printed as the no-style end.
+  video   two 720p talking-head clips at 960x540 and 30 fps: flow-warped luma error on moving
+          pixels (RAFT-small, over 1 px and forward-backward consistent), frame-to-frame luma
+          change on the static background, and output / input change for gaussian noise there
 
 MODEL is magenta-zeros, magenta-replicate (shipped), magenta-aa (anti-aliased architecture with
 the Magenta weights), or a train_stable.py checkpoint. --data holds val2017/, heldout/ and video/.
+EVAL_STYLES are held out of train_stable.py.
 
 Usage: uv run stability_metrics.py MODEL [MODEL ...] --data DIR [--out results.json] [--stills DIR]
 """
 import argparse
 import glob
 import json
+import math
 import os
 import random
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -36,13 +45,21 @@ STYLES = os.path.join(REPO, "Styles")
 REFERENCE = "magenta-replicate"
 EVAL_STYLES = ["starry_night", "great_wave", "the_scream"]
 VIDEOS = ["Johnny_1280x720_60.y4m", "KristenAndSara_1280x720_60.y4m"]
-SHIFTS = [0.5, 1, 2, 3, 4, 8]
+PHASES = [(dy, dx) for dy in range(4) for dx in range(4)]
+FAR = [(0, 4), (4, 0), (0, 8), (8, 0)]
+SHIFTS = [1, 2, 3, 4, 8]
+BANDS = ["top", "mid", "low", "std"]
 WINDOW, MARGIN, BORDER = 384, 8, 16
 NOISE_SIGMA = 2 / 255
 VIDEO_SIZE = (960, 540)
 VIDEO_FRAMES, VIDEO_STEP = 100, 2
+FLOW_SIZE = (480, 272)
+MOVING_FLOW, MAX_INCONSISTENCY = 1.0, 0.5
+NOISE_FRAME_STEP = 10
 STATIC_THRESHOLD = 2 / 255
 STILL_FRAME = 60
+STILL_IMAGES = (0, 1, 13, 17)
+LAPLACIAN = torch.tensor([[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]).view(1, 1, 3, 3)
 
 
 def device():
@@ -124,13 +141,36 @@ def gram(f):
     return f @ f.transpose(1, 2) / (h * w)
 
 
-def texture(y):
-    k = torch.tensor([[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]], device=y.device).view(1, 1, 3, 3)
-    return F.conv2d(interior(luma(y)), k).abs().mean().item() * 255
+def gauss(x, sigma):
+    r = math.ceil(3 * sigma)
+    t = torch.arange(-r, r + 1, device=x.device, dtype=x.dtype)
+    k = torch.exp(-t * t / (2 * sigma * sigma))
+    k = k / k.sum()
+    c = x.shape[1]
+    x = F.conv2d(F.pad(x, (r, r, 0, 0), mode="replicate"), k.view(1, 1, 1, -1).expand(c, 1, 1, -1), groups=c)
+    return F.conv2d(F.pad(x, (0, 0, r, r), mode="replicate"), k.view(1, 1, -1, 1).expand(c, 1, -1, 1), groups=c)
+
+
+def interior(t, b=BORDER):
+    return t[:, :, b:t.shape[2] - b, b:t.shape[3] - b]
+
+
+def bands(y, border=BORDER):
+    """Per image [N, 4]: top-octave, mid and low band energy of luma, and luma std, over the interior."""
+    y = luma(y)
+    g1, g3, g8 = gauss(y, 1), gauss(y, 3), gauss(y, 8)
+    top = F.pad(F.conv2d(y, LAPLACIAN.to(y.device, y.dtype)), (1, 1, 1, 1))
+    mean = [interior(t, border).mean((1, 2, 3)) for t in (top.abs(), (g1 - g3).abs(), (g3 - g8).abs())]
+    return torch.stack(mean + [interior(y, border).std((1, 2, 3))], 1)
 
 
 def rel(a, b):
     return ((a - b).flatten(1).norm(dim=1) / b.flatten(1).norm(dim=1)).mean().item()
+
+
+def mad(a, b):
+    """On the CPU: on MPS a broadcast diff of the phase stack now and then reduced to a wrong value."""
+    return (a.cpu() - b.cpu()).abs().mean().item() * 255
 
 
 def center_source(path):
@@ -146,37 +186,14 @@ def window(src, dy=0, dx=0):
     return src[:, :, MARGIN + dy:MARGIN + dy + WINDOW, MARGIN + dx:MARGIN + dx + WINDOW]
 
 
-def interior(t, extra=0):
-    b = BORDER + extra
-    return t[:, :, b:t.shape[2] - b, b:t.shape[3] - b]
-
-
-def shift_inputs(src):
-    """The unshifted window, then per shift an x and a y pair (a, b). A 0.5 px pair is resampled
-    at -0.25 and +0.25 px so both sides get the same blur."""
-    base = window(src)
-    xs, pairs = [base], []
-    for s in SHIFTS:
-        for axis in (3, 2):
-            if s == 0.5:
-                dy, dx = (0, 1) if axis == 3 else (1, 0)
-                xs.append(0.75 * base + 0.25 * window(src, dy, dx))
-                xs.append(0.75 * base + 0.25 * window(src, -dy, -dx))
-                pairs.append((s, axis, len(xs) - 2, len(xs) - 1))
-            else:
-                xs.append(window(src, s, 0) if axis == 2 else window(src, 0, s))
-                pairs.append((s, axis, 0, len(xs) - 1))
-    return torch.cat(xs), pairs
+def aligned_phases(ys):
+    """Outputs for the PHASES windows cropped to the same source pixels."""
+    return torch.cat([ys[j:j + 1, :, 3 - dy:WINDOW - dy, 3 - dx:WINDOW - dx] for j, (dy, dx) in enumerate(PHASES)])
 
 
 def compensated_diff(ya, yb, s, axis):
     n = ya.shape[axis]
-    if s == 0.5:
-        a = 0.75 * ya.narrow(axis, 1, n - 2) + 0.25 * ya.narrow(axis, 0, n - 2)
-        b = 0.75 * yb.narrow(axis, 1, n - 2) + 0.25 * yb.narrow(axis, 2, n - 2)
-    else:
-        a, b = ya.narrow(axis, s, n - s), yb.narrow(axis, 0, n - s)
-    return (interior(a) - interior(b)).abs().mean().item() * 255
+    return mad(interior(ya.narrow(axis, s, n - s)), interior(yb.narrow(axis, 0, n - s)))
 
 
 @torch.no_grad()
@@ -188,71 +205,78 @@ def run(model, x, style, batch=6):
 @torch.no_grad()
 def image_metrics(model, paths, styles, paintings, vgg, reference_out):
     dev = device()
-    shift = {s: [] for s in SHIFTS}
+    acc = defaultdict(list)
     noise = {k: ([], []) for k in ("noise", "noise_smooth")}
-    style_d, content_d, tex, ref_px, ref_vgg = [], [], [], [], []
     outputs = {}
     gen = torch.Generator().manual_seed(0)
     for i, path in enumerate(paths):
         src = center_source(path).to(dev)
-        xs, pairs = shift_inputs(src)
-        base = xs[:1]
+        base = window(src)
         smooth = F.interpolate(torch.randn(1, 3, WINDOW // 4, WINDOW // 4, generator=gen), scale_factor=4.0,
                                mode="bilinear", align_corners=False)
-        noisy = {"noise": base + torch.randn(base.shape, generator=gen).to(dev) * NOISE_SIGMA,
-                 "noise_smooth": base + smooth.to(dev) * NOISE_SIGMA}
-        noisy = {k: v.clamp(0, 1) for k, v in noisy.items()}
+        noisy = [base + torch.randn(base.shape, generator=gen).to(dev) * NOISE_SIGMA, base + smooth.to(dev) * NOISE_SIGMA]
+        noisy = [v.clamp(0, 1) for v in noisy]
+        xs = torch.cat([window(src, dy, dx) for dy, dx in PHASES + FAR] + noisy)
         feats_in = vgg(base)
         for sid, style in styles.items():
-            ys = run(model, torch.cat([xs] + list(noisy.values())), style)
-            for s, axis, a, b in pairs:
-                shift[s].append(compensated_diff(ys[a:a + 1], ys[b:b + 1], s, axis))
+            ys = run(model, xs, style)
             y = ys[:1]
-            for j, (k, x) in enumerate(noisy.items()):
-                yn = ys[len(xs) + j:len(xs) + j + 1]
-                noise[k][0].append((interior(yn) - interior(y)).abs().mean().item())
-                noise[k][1].append((interior(x) - interior(base)).abs().mean().item())
+            al = aligned_phases(ys)
+            m = al.mean(0, keepdim=True)
+            acc["reroll"].append(mad(interior(al), interior(m)))
+            for s in (1, 2, 3):
+                for p in ((0, s), (s, 0)):
+                    j = PHASES.index(p)
+                    acc[f"shift_{s}"].append(mad(interior(al[:1]), interior(al[j:j + 1])))
+            for j, (dy, dx) in enumerate(FAR, start=len(PHASES)):
+                acc[f"shift_{dx or dy}"].append(compensated_diff(y, ys[j:j + 1], dx or dy, 3 if dx else 2))
+            acc["bands_y"].append(bands(al[:1]).cpu().numpy() * 255)
+            acc["bands_m"].append(bands(m).cpu().numpy() * 255)
+            for j, ((o, n), x) in enumerate(zip(noise.values(), noisy), start=len(PHASES) + len(FAR)):
+                o.append(mad(interior(ys[j:j + 1]), interior(y)))
+                n.append(mad(interior(x), interior(base)))
             feats = vgg(y)
-            style_d.append(np.mean([rel(gram(f), g) for f, g in zip(feats, paintings[sid])]))
-            content_d.append(rel(feats[2], feats_in[2]))
-            tex.append(texture(y))
+            acc["gram_to_painting"].append(np.mean([rel(gram(f), g) for f, g in zip(feats, paintings[sid])]))
+            acc["relu33_to_input"].append(rel(feats[2], feats_in[2]))
             outputs[(i, sid)] = y.half().cpu()
             if reference_out is not None:
                 r = reference_out[(i, sid)].float().to(dev)
-                ref_px.append((y - r).abs().mean().item() * 255)
-                ref_vgg.append(rel(feats[2], vgg(r)[2]))
+                fr = vgg(r)
+                acc["gram_to_shipped"].append(np.mean([rel(gram(f), gram(g)) for f, g in zip(feats, fr)]))
+                acc["relu33_to_shipped"].append(rel(feats[2], fr[2]))
+                acc["lowpass_to_shipped"].append(mad(interior(gauss(y, 2)), interior(gauss(r, 2))))
     metrics = {
-        "shift": {str(s): float(np.mean(v)) for s, v in shift.items()},
-        **{f"{k}_ratio": float(np.sum(o) / np.sum(i)) for k, (o, i) in noise.items()},
-        **{f"{k}_out": float(np.mean(o) * 255) for k, (o, i) in noise.items()},
-        "gram_to_painting": float(np.mean(style_d)),
-        "relu33_to_input": float(np.mean(content_d)),
-        "texture": float(np.mean(tex)),
+        "shift": {str(s): float(np.mean(acc[f"shift_{s}"])) for s in SHIFTS},
+        "reroll": float(np.mean(acc["reroll"])),
+        "bands": dict(zip(BANDS, np.concatenate(acc["bands_y"]).mean(0).tolist())),
+        "bands_stable": dict(zip(BANDS, np.concatenate(acc["bands_m"]).mean(0).tolist())),
+        **{f"{k}_ratio": float(np.sum(o) / np.sum(n)) for k, (o, n) in noise.items()},
     }
-    if reference_out is not None:
-        metrics["px_to_shipped"] = float(np.mean(ref_px))
-        metrics["relu33_to_shipped"] = float(np.mean(ref_vgg))
+    for k in ("gram_to_painting", "relu33_to_input", "gram_to_shipped", "relu33_to_shipped", "lowpass_to_shipped"):
+        metrics[k] = float(np.mean(acc[k])) if acc[k] else 0.0
     return metrics, outputs
 
 
 @torch.no_grad()
 def unstyled_reference(paths, paintings, vgg):
-    """The Gram distance and texture of the unstyled input."""
+    """The Gram distance and band energies of the unstyled input."""
     dev = device()
-    g, tex = [], []
+    g, b = [], []
     for path in paths:
         x = window(center_source(path).to(dev))
         feats = vgg(x)
         g += [np.mean([rel(gram(f), p) for f, p in zip(feats, ps)]) for ps in paintings.values()]
-        tex.append(texture(x))
-    return {"gram_to_painting": float(np.mean(g)), "texture": float(np.mean(tex))}
+        b.append(bands(x).cpu().numpy() * 255)
+    return {"gram_to_painting": float(np.mean(g)), "bands": dict(zip(BANDS, np.concatenate(b).mean(0).tolist()))}
 
 
 def read_y4m(path, count, step):
+    """I420 y4m as RGB in [0, 1]. Limited range unless the header says XCOLORRANGE=FULL."""
     with open(path, "rb") as f:
         header = f.readline().split()
         w = int(next(t[1:] for t in header if t.startswith(b"W")))
         h = int(next(t[1:] for t in header if t.startswith(b"H")))
+        full = b"XCOLORRANGE=FULL" in header
         size = w * h * 3 // 2
         frames = []
         for i in range(count * step):
@@ -264,6 +288,8 @@ def read_y4m(path, count, step):
             y = yuv[:w * h].reshape(h, w)
             u = yuv[w * h:w * h + size // 6].reshape(h // 2, w // 2).repeat(2, 0).repeat(2, 1) - 128
             v = yuv[w * h + size // 6:].reshape(h // 2, w // 2).repeat(2, 0).repeat(2, 1) - 128
+            if not full:
+                y, u, v = (y - 16) * (255 / 219), u * (255 / 224), v * (255 / 224)
             rgb = np.stack([y + 1.402 * v, y - 0.344136 * u - 0.714136 * v, y + 1.772 * u])
             x = torch.from_numpy(np.clip(rgb, 0, 255) / 255.0)[None].float()
             frames.append(F.interpolate(x, size=VIDEO_SIZE[::-1], mode="bilinear", antialias=True, align_corners=False))
@@ -275,29 +301,83 @@ def static_mask(dy):
     return F.max_pool2d(local, 15, 1, 7) < STATIC_THRESHOLD
 
 
+def warp(img, flow):
+    n, _, h, w = img.shape
+    yy, xx = torch.meshgrid(torch.arange(h, dtype=img.dtype), torch.arange(w, dtype=img.dtype), indexing="ij")
+    gx = (xx + flow[:, 0]) / (w - 1) * 2 - 1
+    gy = (yy + flow[:, 1]) / (h - 1) * 2 - 1
+    return F.grid_sample(img, torch.stack([gx, gy], -1), mode="bilinear", padding_mode="border", align_corners=True)
+
+
 @torch.no_grad()
-def video_metrics(model, videos, styles):
+def motion(frames):
+    """Per frame pair (t-1, t): flow from t back to t-1, and a mask of consistent moving pixels."""
     dev = device()
-    rows = {}
-    stills = {}
+    raft = torchvision.models.optical_flow.raft_small(
+        weights=torchvision.models.optical_flow.Raft_Small_Weights.DEFAULT).to(dev).eval()
+    small = F.interpolate(frames, size=FLOW_SIZE[::-1], mode="bilinear", antialias=True, align_corners=False) * 2 - 1
+    scale = torch.tensor([VIDEO_SIZE[0] / FLOW_SIZE[0], VIDEO_SIZE[1] / FLOW_SIZE[1]]).view(1, 2, 1, 1)
+    back, fwd = [], []
+    for t in range(1, len(frames)):
+        a, b = small[t:t + 1].to(dev), small[t - 1:t].to(dev)
+        back.append(raft(a, b)[-1].cpu())
+        fwd.append(raft(b, a)[-1].cpu())
+
+    def full(f):
+        return F.interpolate(torch.cat(f), size=VIDEO_SIZE[::-1], mode="bilinear", align_corners=False) * scale
+
+    back, fwd = full(back), full(fwd)
+    consistent = (back + warp(fwd, back)).norm(dim=1, keepdim=True) < MAX_INCONSISTENCY
+    moving = consistent & (back.norm(dim=1, keepdim=True) > MOVING_FLOW)
+    moving[:, :, :BORDER] = moving[:, :, -BORDER:] = False
+    moving[:, :, :, :BORDER] = moving[:, :, :, -BORDER:] = False
+    return back, moving
+
+
+def warped_error(y, flow, mask):
+    y = luma(y)
+    e = (y[1:] - warp(y[:-1], flow)).abs()
+    return (e * mask).sum().item(), mask.sum().item()
+
+
+@torch.no_grad()
+def video_metrics(model, videos, flows, styles):
+    dev = device()
+    rows, stills = {}, {}
     for name, frames in videos.items():
+        flow, moving = flows[name]
         yin = interior(luma(frames))
         din = (yin[1:] - yin[:-1]).abs()
         mask = static_mask(din)
-        sums = np.zeros(4)
+        idx = list(range(0, len(frames) - 1, NOISE_FRAME_STEP))
+        gen = torch.Generator().manual_seed(0)
+        noisy = (frames[idx] + torch.randn(frames[idx].shape, generator=gen) * NOISE_SIGMA).clamp(0, 1)
+        nmask = mask[idx]
+        nin = (interior(luma(noisy)) - interior(luma(frames[idx]))).abs()
+        sums = defaultdict(float)
         for sid, style in styles.items():
             out = torch.cat([run(model, frames[i:i + 4].to(dev), style).cpu() for i in range(0, len(frames), 4)])
             yout = interior(luma(out))
             dout = (yout[1:] - yout[:-1]).abs()
-            sums += [t.sum().item() for t in (dout, din, dout * mask, din * mask)]
+            sums["static_out"] += (dout * mask).sum().item()
+            sums["static_in"] += (din * mask).sum().item()
+            e, n = warped_error(out, flow, moving)
+            sums["moving_out"] += e
+            sums["moving_n"] += n
+            yn = interior(luma(torch.cat([run(model, noisy[i:i + 4].to(dev), style).cpu() for i in range(0, len(noisy), 4)])))
+            sums["noise_out"] += ((yn - yout[idx]).abs() * nmask).sum().item()
+            sums["noise_in"] += (nin * nmask).sum().item()
             stills[(name, sid)] = (out[STILL_FRAME:STILL_FRAME + 1], out[STILL_FRAME - 1:STILL_FRAME])
-        n_all, n_static = din.numel(), mask.sum().item()
+        n_static = mask.sum().item() * len(styles)
+        e_in, n_in = warped_error(frames, flow, moving)
         rows[name] = {
-            "ratio_all": float(sums[0] / sums[1]),
-            "ratio_static": float(sums[2] / sums[3]),
-            "out_static": float(sums[2] / n_static / len(styles) * 255),
-            "in_static": float(sums[3] / n_static / len(styles) * 255),
-            "static_fraction": n_static / n_all,
+            "moving_out": sums["moving_out"] / sums["moving_n"] * 255,
+            "moving_in": e_in / n_in * 255,
+            "moving_fraction": n_in / moving.numel(),
+            "static_out": sums["static_out"] / n_static * 255,
+            "static_in": sums["static_in"] / n_static * 255,
+            "static_fraction": mask.float().mean().item(),
+            "wall_noise_ratio": sums["noise_out"] / sums["noise_in"],
         }
     return rows, stills
 
@@ -333,26 +413,42 @@ def grid(rows):
 
 def print_tables(results, unstyled):
     names = list(results)
-    print("\nshift sensitivity, motion-compensated mean abs diff (0-255)")
-    print("| model | " + " | ".join(f"{s} px" for s in SHIFTS) + " |")
-    for n in names:
-        print(f"| {n} | " + " | ".join(f"{results[n]['images']['shift'][str(s)]:.2f}" for s in SHIFTS) + " |")
-    print(f"\nnoise (sigma 2/255) and style fidelity; the input has Gram {unstyled['gram_to_painting']:.4f}, "
-          f"texture {unstyled['texture']:.2f}")
-    print("| model | noise out/in | noise out (0-255) | smooth noise out/in | smooth noise out | "
-          "Gram to painting | relu3_3 to input | texture | px to shipped | relu3_3 to shipped |")
+    ref = results[names[0]]["images"]
+    print("\nshift: motion-compensated mean abs diff, and re-roll (distance to the position-stable part)")
+    print("| model | " + " | ".join(f"{s} px" for s in SHIFTS) + " | re-roll |")
     for n in names:
         m = results[n]["images"]
-        print(f"| {n} | {m['noise_ratio']:.3f} | {m['noise_out']:.2f} | {m['noise_smooth_ratio']:.3f} | "
-              f"{m['noise_smooth_out']:.2f} | {m['gram_to_painting']:.4f} | "
-              f"{m['relu33_to_input']:.4f} | {m['texture']:.2f} | {m.get('px_to_shipped', 0):.2f} | "
-              f"{m.get('relu33_to_shipped', 0):.4f} |")
-    print("\nvideo, 960x540 at 30 fps: mean |dY_out| / mean |dY_in|, and static background out |dY| (0-255)")
-    print("| model | video | ratio all | ratio static | out static | in static | static frac |")
+        print(f"| {n} | " + " | ".join(f"{m['shift'][str(s)]:.2f}" for s in SHIFTS) + f" | {m['reroll']:.2f} |")
+    ub = unstyled["bands"]
+    print(f"\nbands: output / stable part M, ratio of M to {names[0]} in brackets; the input has Gram "
+          f"{unstyled['gram_to_painting']:.3f}, top {ub['top']:.2f}, mid {ub['mid']:.2f}, low {ub['low']:.2f}, "
+          f"std {ub['std']:.1f}")
+    print("| model | top | mid | low | luma std | Gram to painting | Gram to shipped | relu3_3 to shipped | "
+          "low-pass px to shipped |")
     for n in names:
-        for v, m in results[n]["video"].items():
-            print(f"| {n} | {v.split('_')[0]} | {m['ratio_all']:.3f} | {m['ratio_static']:.3f} | "
-                  f"{m['out_static']:.2f} | {m['in_static']:.2f} | {m['static_fraction']:.2f} |")
+        m = results[n]["images"]
+        b, s, rs = m["bands"], m["bands_stable"], ref["bands_stable"]
+        cells = [f"{b[k]:.2f} / {s[k]:.2f} ({s[k] / rs[k]:.2f})" for k in ("top", "mid", "low")]
+        cells.append(f"{s['std']:.1f} ({s['std'] / rs['std']:.2f})")
+        cells += [f"{m[k]:.3f}" for k in ("gram_to_painting", "gram_to_shipped", "relu33_to_shipped")]
+        cells.append(f"{m['lowpass_to_shipped']:.2f}")
+        print(f"| {n} | " + " | ".join(cells) + " |")
+    print("\nnoise sigma 2/255, output / input change: COCO per pixel and smooth, static wall of each clip")
+    print("| model | COCO | COCO smooth | " + " | ".join(v.split("_")[0] for v in VIDEOS) + " |")
+    for n in names:
+        m, v = results[n]["images"], results[n]["video"]
+        print(f"| {n} | {m['noise_ratio']:.2f} | {m['noise_smooth_ratio']:.2f} | "
+              + " | ".join(f"{v[k]['wall_noise_ratio']:.2f}" for k in VIDEOS) + " |")
+    print("\nvideo, 960x540 at 30 fps: warped luma error on moving pixels and luma change on the static "
+          "background, output (input)")
+    print("| model | " + " | ".join(f"{v.split('_')[0]} moving | {v.split('_')[0]} static" for v in VIDEOS) + " |")
+    for n in names:
+        v = results[n]["video"]
+        print(f"| {n} | " + " | ".join(f"{v[k]['moving_out']:.2f} ({v[k]['moving_in']:.2f}) | "
+                                       f"{v[k]['static_out']:.2f} ({v[k]['static_in']:.2f})" for k in VIDEOS) + " |")
+    v = results[names[0]]["video"]
+    print("moving / static fraction: " + ", ".join(
+        f"{k.split('_')[0]} {v[k]['moving_fraction']:.3f} / {v[k]['static_fraction']:.2f}" for k in VIDEOS))
 
 
 def main():
@@ -378,6 +474,7 @@ def main():
             paintings[sid] = [gram(f) for f in vgg(paint)]
     images = heldout_paths(args.data, args.images)
     videos = {v: read_y4m(os.path.join(args.data, "video", v), VIDEO_FRAMES, VIDEO_STEP) for v in VIDEOS}
+    flows = {v: motion(frames) for v, frames in videos.items()}
 
     specs = [REFERENCE] + [m for m in args.models if m != REFERENCE]
     results, image_outputs, video_outputs = {}, {}, {}
@@ -389,15 +486,15 @@ def main():
         if reference_out is None:
             reference_out = image_outputs[name]
         results[name] = {"images": im}
-        results[name]["video"], video_outputs[name] = video_metrics(model, videos, styles)
-        print(name, json.dumps(results[name]))
+        results[name]["video"], video_outputs[name] = video_metrics(model, videos, flows, styles)
+        print(name, json.dumps(results[name]), flush=True)
     unstyled = unstyled_reference(images, paintings, vgg)
     print_tables(results, unstyled)
     if args.out:
         with open(args.out, "w") as f:
             json.dump({"input": unstyled, **results}, f, indent=1)
     if args.stills:
-        inputs = {i: window(center_source(images[i])) for i in (0, 1)}
+        inputs = {i: window(center_source(images[i])) for i in STILL_IMAGES if i < len(images)}
         shown = [label(m) for m in specs if m in args.models]
         save_stills(args.stills, shown, videos, inputs, image_outputs, video_outputs)
 

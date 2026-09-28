@@ -55,14 +55,19 @@ uv run stability_metrics.py magenta-replicate CKPT/antialias.pt --data DATA
 uv run convert_coreml.py --checkpoint CKPT/antialias.pt --sizes 960x540 --out OUT
 ```
 
-`DATA` holds COCO `val2017/`, a person-heavy subset of it in `content500/`, `heldout/`, and `video/` with the 720p60 clips `Johnny_1280x720_60.y4m` and `KristenAndSara_1280x720_60.y4m` (I420 y4m). The metrics use 50 held-out images that training skips, 3 paintings, and 100 frames of each clip at 960x540 and 30 fps. `--arch antialias` blurs before the two stride-2 convs and upsamples bilinearly; the Magenta weights load into it unchanged. `convert_coreml.py --checkpoint` keeps the model inputs and outputs, and without `--out` it overwrites the shipped transformers.
+`DATA` holds COCO `val2017/`, a person-heavy subset of it in `content500/`, `heldout/`, and `video/` with the 720p60 clips `Johnny_1280x720_60.y4m` and `KristenAndSara_1280x720_60.y4m` (I420 y4m, read as limited range unless the header says `XCOLORRANGE=FULL`). The metrics use 50 held-out images that training skips, 3 paintings, and 100 frames of each clip at 960x540 and 30 fps. Moving pixels come from RAFT-small flow; torchvision downloads its weights on first use. `--arch antialias`, the default, blurs before the two stride-2 convs and upsamples bilinearly; the Magenta weights load into it unchanged. `convert_coreml.py --checkpoint` keeps the model inputs and outputs, and without `--out` it overwrites the shipped transformers.
 
 Shipped model (replicate padding), 0-255 scale:
 
 | Metric | Value |
 |---|---|
-| Output diff after a 0.5 / 1 / 2 / 3 / 4 / 8 px shift, motion compensated | 5.3 / 10.9 / 13.9 / 10.9 / 0.9 / 1.3 |
-| Output diff / input diff, gaussian noise 2/255, per pixel / smooth | 2.2 / 6.0 |
-| Frame-to-frame luma change on the static background, output (input) | 14.4 (0.72) Johnny, 11.6 (0.69) KristenAndSara |
+| Output diff after a 1 / 2 / 3 / 4 / 8 px shift, motion compensated | 10.9 / 13.9 / 10.9 / 0.9 / 1.3 |
+| Re-roll: mean distance to the output averaged over the 16 shifts of 0-3 px | 9.4 |
+| Top-octave luma energy, output / shift-averaged | 21.4 / 11.1 |
+| Output / input change, gaussian noise 2/255: COCO per pixel, smooth; static wall | 2.2, 6.0; 8.4 Johnny, 6.7 KristenAndSara |
+| Flow-warped luma error on moving pixels, output (input) | 14.1 (2.4) Johnny, 14.9 (2.5) KristenAndSara |
+| Frame-to-frame luma change on the static background, output (input) | 14.8 (0.82) Johnny, 11.8 (0.78) KristenAndSara |
 
-Most of the shift error comes from the nearest upsampling, not the strided convs. With the Magenta weights on 15 held-out images, the 2 px error is 13.8 with nearest, 13.8 with the blur alone, 7.4 with bilinear alone, and 6.1 with both. At 960x540 the anti-aliased graph takes 14.9 ms on the GPU (shipped: 14.0) and 17.9 ms on the ANE (shipped: 15.0), median of 300 synchronous predictions. Bilinear upsampling is about 2.1 ms of the ANE cost and free on the GPU. The blur costs about 0.7 ms on both.
+Half of the shipped model's top-octave texture is the re-roll itself. The flow-warped error rises with texture energy even when the texture moves correctly, because flow error scales with it.
+
+Most of the shift error comes from the nearest upsampling, but bilinear upsampling also removes stable texture. With the Magenta weights on 16 held-out images, the 2 px error is 13.8 with nearest, 13.8 with the blur alone, 7.4 with bilinear alone, and 6.1 with both, and the shift-averaged top-octave energy is 11.0, 9.8, 6.9 and 6.8. At 960x540 the anti-aliased graph takes 14.9 ms on the GPU (shipped: 14.0) and 17.9 ms on the ANE (shipped: 15.0); at 640x360 on the ANE it takes 7.9 ms (shipped: 6.7). Median of 300 synchronous predictions. Bilinear upsampling is about 2.1 ms of the ANE cost at 960x540 and free on the GPU. The blur costs about 0.7 ms on both.
