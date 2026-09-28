@@ -20,5 +20,6 @@ To use StyleCam's own camera you need a paid Apple Developer team, and the app m
 ## Docs
 
 - [docs/NOTES.md](docs/NOTES.md): spec, architecture, decisions
+- [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md): speed, flicker, auto quality
 - [docs/RESEARCH.md](docs/RESEARCH.md): sources
 - [docs/NEEDS_INPUT.md](docs/NEEDS_INPUT.md): open items for the owner
