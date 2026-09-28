@@ -4,7 +4,8 @@ Usage: uv run convert_coreml.py [--sizes 480x270 640x360 ...] [--padding replica
        uv run convert_coreml.py --checkpoint ckpt.pt [--sizes ...] [--name StableTransformer] [--out DIR]
 
 --checkpoint converts a train_stable.py transformer (either architecture) with the same inputs and
-outputs, and skips the predictor, which fine-tuning does not change.
+outputs, and skips the predictor, which fine-tuning does not change. Its default name is
+StableTransformer, so it does not replace the shipped MagentaTransformer models.
 """
 import argparse
 import os
@@ -128,12 +129,13 @@ def main():
     ap.add_argument("--padding", default="replicate", choices=["replicate", "zeros", "reflect"],
                     help="zeros matches @magenta/image exactly but leaves a dark border")
     ap.add_argument("--checkpoint", help="train_stable.py checkpoint; its padding overrides --padding")
-    ap.add_argument("--name", default="MagentaTransformer", help="output name prefix")
+    ap.add_argument("--name", help="output name prefix, MagentaTransformer or with --checkpoint StableTransformer")
     ap.add_argument("--out", default=MODELS)
     args = ap.parse_args()
     # TFSamePad's pads are meant to be baked into the trace.
     warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
     torch.set_grad_enabled(False)
+    name = args.name or ("StableTransformer" if args.checkpoint else "MagentaTransformer")
     os.makedirs(args.out, exist_ok=True)
     if not args.checkpoint:
         build_predictor(args.out)
@@ -142,7 +144,7 @@ def main():
             t, source = load_checkpoint(args.checkpoint), "Fine-tuned Magenta"
         else:
             t, source = load_transformer(args.padding), "Magenta"
-        build_transformer(t, *parse_size(size), args.out, args.name, source)
+        build_transformer(t, *parse_size(size), args.out, name, source)
 
 
 if __name__ == "__main__":
