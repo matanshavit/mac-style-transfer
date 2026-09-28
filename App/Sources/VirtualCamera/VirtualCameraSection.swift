@@ -20,6 +20,8 @@ struct VirtualCameraStatus {
             (title, color) = ("OBS not found", .gray)
         case (.styleCam, .connected):
             (title, color) = (clients == 0 ? "Ready" : "In use by \(clients) \(clients == 1 ? "app" : "apps")", .green)
+        case (.styleCam, .error):
+            (title, color) = ("Can’t connect", .red)
         case (.styleCam, _):
             (title, color) = switch model.extensionManager.state {
             case .activated: ("Installed", .green)
@@ -125,6 +127,9 @@ struct VirtualCameraSection: View {
             return model.virtualCamera.sourceClientCount ?? 0 > 0
                 ? []
                 : ["Choose “\(StyleCamIDs.deviceName)” as the camera in Zoom, Meet or FaceTime."]
+        }
+        if case .error(let error) = model.virtualCamera.status {
+            return ["Another app may be sending to the StyleCam camera. StyleCam keeps trying.", error]
         }
         switch manager.state {
         case .activated:

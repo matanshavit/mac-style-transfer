@@ -123,10 +123,14 @@ final class AppModel {
         steadySizes.isEmpty ? .classic : preferences.network
     }
 
-    /// OBS's device has no client count, so the camera stays on while StyleCam is connected to it.
+    /// OBS's device has no client count, so the camera stays on while StyleCam is connected to it. It also stays on
+    /// after a failed start, so the output keeps retrying.
     private var keepsCameraOnForOBS: Bool {
-        guard preferences.virtualCameraTarget == .obs, case .connected = virtualCamera.status else { return false }
-        return true
+        guard preferences.virtualCameraTarget == .obs else { return false }
+        switch virtualCamera.status {
+        case .connected, .error: return true
+        case .disconnected, .notFound, .busy: return false
+        }
     }
 
     private var virtualCameraOutput: VirtualCameraOutput {

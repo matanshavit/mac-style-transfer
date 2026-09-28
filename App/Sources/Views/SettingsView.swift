@@ -10,7 +10,7 @@ struct SettingsView: View {
             Section {
                 Toggle("Open StyleCam at login", isOn: Binding(get: { status == .enabled || status == .requiresApproval }, set: setLaunchAtLogin))
                 if status == .requiresApproval {
-                    Text("Allow StyleCam in System Settings > General > Login Items.")
+                    Text("Allow StyleCam in System Settings > General > Login Items & Extensions.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
