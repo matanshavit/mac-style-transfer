@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import os
+import Security
 import SystemExtensions
 
 @MainActor
@@ -20,6 +21,18 @@ final class ExtensionManager: NSObject {
         case activate
         case deactivate
     }
+
+    /// Ad-hoc builds (`make build`) have no team, and macOS refuses to install their camera extension.
+    static let hasDeveloperTeam: Bool = {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let info = info as? [String: Any] else { return false }
+        return info[kSecCodeInfoTeamIdentifier as String] is String
+    }()
 
     private(set) var state: State = initialState
 
