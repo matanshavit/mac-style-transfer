@@ -32,7 +32,7 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
     private var consumeInFlight = false
     private var placeholderTimer: DispatchSourceTimer?
     private var lastSinkFrameNanos: UInt64 = 0
-    private var lastSourceFrameNanos: UInt64 = 0
+    private var nextSourceFrameNanos: UInt64 = 0
     private var formatDescription: CMVideoFormatDescription?
     private var loggedRejectedFrame = false
 
@@ -136,6 +136,7 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
         queue.async {
             self.placeholderTimer?.cancel()
             self.placeholderTimer = nil
+            self.nextSourceFrameNanos = 0
             self.updateTimers()
         }
     }
@@ -251,10 +252,18 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
         timer.activate()
     }
 
+    /// Forwards on a schedule of one frame per client frame duration. Sink frames land on consume ticks, up to a tick
+    /// early or late. The slack covers that but stays under the feed's frame interval, so a 15 fps client still gets
+    /// every other frame of a 30 fps feed.
     private func forward(_ pixelBuffer: CVPixelBuffer, hostTimeNanos: UInt64) {
+        guard isSourceStreaming else { return }
         let frameDuration = sourceStream.frameDuration
-        guard isSourceStreaming, hostTimeNanos &- lastSourceFrameNanos >= Self.nanoseconds(frameDuration) / 10 * 9 else { return }
+        let duration = Self.nanoseconds(frameDuration)
+        if hostTimeNanos > nextSourceFrameNanos &+ duration { nextSourceFrameNanos = hostTimeNanos }
+        let slack = min(duration, Self.nanoseconds(Self.defaultFrameDuration)) / 2
+        guard hostTimeNanos &+ slack >= nextSourceFrameNanos else { return }
         sendToSource(pixelBuffer, hostTimeNanos: hostTimeNanos, frameDuration: frameDuration)
+        nextSourceFrameNanos &+= duration
     }
 
     private static func isFresh(_ sampleBuffer: CMSampleBuffer, hostTimeNanos: UInt64) -> Bool {
@@ -302,7 +311,6 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource, @uncheck
             return
         }
         sourceStream.stream.send(sampleBuffer, discontinuity: [], hostTimeInNanoseconds: hostTimeNanos)
-        lastSourceFrameNanos = hostTimeNanos
     }
 
     private static func hostTimeNanos() -> UInt64 {
