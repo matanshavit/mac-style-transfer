@@ -4,13 +4,15 @@ import StyleKit
 let usage = """
 stylecam-cli \(StyleKit.version)
 
-  bench     --models <dir> --size WxH --mode gpu|ane|dual [--iters N] [--inflight N]
+  bench     --models <dir> --size WxH --mode gpu|ane|dual [--network classic|steady] [--iters N] [--inflight N]
   run       --models <dir> --styles <dir> --style <id or image> --input <file.y4m> --out <file.mp4>
             [--frames N] [--loop] [--fps 30] [--quality auto|fast|balanced|max] [--size WxH --mode gpu|ane|dual]
+            [--network classic|steady]
             [--strength 0..1] [--smoothing 0..1] [--upsample bilinear|guided] [--detail x] [--preserve-colors]
             [--mask everything|background|person] [--segmentation fast|balanced] [--realtime] [--log-adaptive]
             [--codec h264|hevc] [--stills <dir>] [--still-frames a,b,c]
-            --loop repeats the input up to --frames; --log-adaptive prints auto quality decisions and stats each second
+            --loop repeats the input up to --frames; --log-adaptive prints auto quality decisions and stats each second;
+            --network defaults to classic; with steady, sizes without a steady model run classic
   styles    --styles <dir> --models <dir> [--json]
   devices   list CMIO video devices and their streams
   push-test --uid <uid> [--name <fallback name>] [--seconds <n>]

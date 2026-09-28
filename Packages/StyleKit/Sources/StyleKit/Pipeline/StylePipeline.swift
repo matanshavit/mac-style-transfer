@@ -21,6 +21,9 @@ public struct ProcessedFrame: @unchecked Sendable {
 /// An adaptive quality only adapts in `.dropFrames` mode; `.waitForSlot` runs its preferred configuration. At most two
 /// engines stay loaded, the running one and the one being switched to or the adaptive fallback, plus an adaptive trial
 /// while one runs.
+///
+/// A size without a model for the chosen network, or whose model failed to load, runs classic, so the choice of
+/// network never stops frames from being stylized.
 public final class StylePipeline: @unchecked Sendable {
     public enum Backpressure: Sendable {
         case dropFrames
@@ -92,6 +95,11 @@ public final class StylePipeline: @unchecked Sendable {
         var lastOutput: CMTime
     }
 
+    private struct EngineKey: Hashable {
+        var network: StyleNetwork
+        var quality: Quality
+    }
+
     private let context: MetalContext
     private let renderer: FrameRenderer
     private let segmenter: PersonSegmenter
@@ -107,13 +115,15 @@ public final class StylePipeline: @unchecked Sendable {
 
     private let adaptive: AdaptiveController
     private var conditionsMonitor: SystemConditionsMonitor?
-    private var engines: [Quality: StyleEngine] = [:]
-    private var keptEngines: [Quality] = []
-    private var loadingEngines: Set<Quality> = []
-    private var failedEngines: Set<Quality> = []
+    private let modelSizes: [StyleNetwork: [ModelSize]]
+    private var network: StyleNetwork
+    private var engines: [EngineKey: StyleEngine] = [:]
+    private var keptEngines: [EngineKey] = []
+    private var loadingEngines: Set<EngineKey> = []
+    private var failedEngines: Set<EngineKey> = []
     private var activeEngine: StyleEngine?
     /// The engine that ran last. It stays loaded while frames pass through.
-    private var currentQuality: Quality?
+    private var currentKey: EngineKey?
     private var wantedQuality: Quality?
     private var trialBusy = false
     private var engineFrames = 0
@@ -137,7 +147,11 @@ public final class StylePipeline: @unchecked Sendable {
         context = try MetalContext()
         renderer = try FrameRenderer(context: context, outputWidth: outputWidth, outputHeight: outputHeight)
         segmenter = PersonSegmenter(device: context.device)
-        adaptive = AdaptiveController(availableSizes: modelStore.availableTransformerSizes(), conditions: .current())
+        adaptive = AdaptiveController(conditions: .current())
+        modelSizes = Dictionary(uniqueKeysWithValues: StyleNetwork.allCases.map { network in
+            (network, modelStore.availableTransformerSizes(for: network))
+        })
+        network = settings.network
         shared = Mutex(Shared(settings: settings))
         statsTimer = DispatchSource.makeTimerSource(queue: outputQueue)
         releaseTimer = DispatchSource.makeTimerSource(flags: .strict, queue: outputQueue)
@@ -203,16 +217,20 @@ public final class StylePipeline: @unchecked Sendable {
     /// Loads the engine for the current quality and the style predictor, so the first frames are stylized.
     /// Without it they are loaded on demand and frames pass through unstylized meanwhile.
     public func prepare() async throws {
-        let quality = await withCheckedContinuation { continuation in
-            queue.async { [self] in continuation.resume(returning: engineQuality(for: settings.quality)) }
+        let key = await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                let settings = settings
+                network = settings.network
+                continuation.resume(returning: engineKey(for: engineQuality(for: settings.quality)))
+            }
         }
-        let engine = try await StyleEngine.load(store: modelStore, size: quality.size, mode: quality.mode)
+        let engine = try await Self.loadEngine(key, from: modelStore)
         let predictor = try await StylePredictor.load(from: modelStore)
         await withCheckedContinuation { continuation in
             queue.async { [self] in
-                engines[quality] = engine
-                failedEngines.remove(quality)
-                wantedQuality = quality
+                engines[key] = engine
+                failedEngines.remove(key)
+                wantedQuality = key.quality
                 manageEngines()
                 self.predictor = .ready(predictor)
                 continuation.resume()
@@ -288,12 +306,15 @@ public final class StylePipeline: @unchecked Sendable {
     /// Nil passes the frame through. The active engine keeps running while the wanted one loads.
     private func engine(for settings: PipelineSettings) -> StyleEngine? {
         guard !settings.bypass, settings.style != nil else { return nil }
+        let networkChanged = settings.network != network
+        network = settings.network
         let quality = engineQuality(for: settings.quality)
-        if quality != wantedQuality {
+        if quality != wantedQuality || networkChanged {
             wantedQuality = quality
             manageEngines()
         }
-        return engines[quality] ?? activeEngine
+        if networkChanged { describeEngine() }
+        return engines[engineKey(for: quality)] ?? activeEngine
     }
 
     private func engineQuality(for quality: Quality) -> Quality {
@@ -301,7 +322,21 @@ public final class StylePipeline: @unchecked Sendable {
             if adaptive.stop() { shared.withLock { $0.adaptive = nil } }
             return quality.fixed
         }
-        return adaptive.target(for: quality, current: currentQuality, now: HostClock.now().seconds)
+        let sizes = ModelSize.standard.filter { size in
+            [network, .classic].contains { modelSizes[$0]?.contains(size) == true }
+        }
+        return adaptive.target(for: quality, sizes: sizes, current: currentKey?.quality, now: HostClock.now().seconds)
+    }
+
+    /// The chosen network, or classic where the chosen one has no model or its model failed to load.
+    private func engineKey(for quality: Quality) -> EngineKey {
+        let chosen = EngineKey(network: network, quality: quality)
+        guard !hasModel(chosen), modelSizes[.classic]?.contains(quality.size) == true else { return chosen }
+        return EngineKey(network: .classic, quality: quality)
+    }
+
+    private func hasModel(_ key: EngineKey) -> Bool {
+        modelSizes[key.network]?.contains(key.quality.size) == true && !failedEngines.contains(key)
     }
 
     private func start(_ job: Job) {
@@ -318,6 +353,7 @@ public final class StylePipeline: @unchecked Sendable {
         engineFrames += 1
         job.usesEngine = true
         job.quality = engine.quality
+        job.timings.network = engine.network
         job.dualEngine = engine.mode == .dual
         job.resetHistory = style != lastStyle
         lastStyle = style
@@ -462,12 +498,23 @@ public final class StylePipeline: @unchecked Sendable {
         if activeEngine == nil { renderer.resetHistory() }
         activeEngine = engine
         admission.setLimit((engine?.maxConcurrentFrames ?? 1) + 1)
-        let description = engine.map { "\($0.size) \($0.mode.rawValue)" }
-        shared.withLock { $0.engine = description }
+        describeEngine()
         guard let engine else { return }
-        currentQuality = engine.quality
+        currentKey = EngineKey(network: engine.network, quality: engine.quality)
         manageEngines()
         if adaptive.decision != nil { adaptiveEvent(.switched(engine.quality)) }
+    }
+
+    /// Says why the active engine runs classic when another network is chosen, unless it only runs until the chosen
+    /// network's engine is loaded.
+    private func describeEngine() {
+        let description = activeEngine.map { engine in
+            let text = "\(engine.size) \(engine.mode.rawValue) \(engine.network.rawValue)"
+            let chosen = EngineKey(network: network, quality: engine.quality)
+            guard engine.network != network, engineKey(for: engine.quality) != chosen else { return text }
+            return text + (failedEngines.contains(chosen) ? " (\(network) failed to load)" : " (no \(network) model)")
+        }
+        shared.withLock { $0.engine = description }
     }
 
     private func resetSourceState() {
@@ -480,49 +527,61 @@ public final class StylePipeline: @unchecked Sendable {
     /// Keeps the engine that ran last and the one wanted next or else the adaptive fallback, plus the adaptive trial,
     /// and unloads the rest. An engine still referenced by frames in flight is freed when they finish.
     private func manageEngines() {
-        var keep: [Quality] = []
-        let wanted = adaptive.decision?.quality ?? wantedQuality
-        let trial = adaptive.trialQuality
-        for quality in [currentQuality, wanted, trial, adaptive.fallback].compactMap({ $0 })
-        where keep.count < (trial == nil ? 2 : 3) && !keep.contains(quality) {
-            keep.append(quality)
+        var keep: [EngineKey] = []
+        let wanted = (adaptive.decision?.quality ?? wantedQuality).map(engineKey)
+        let trial = adaptive.trialQuality.map(engineKey)
+        for key in [currentKey, wanted, trial, adaptive.fallback.map(engineKey)].compactMap({ $0 })
+        where keep.count < (trial == nil ? 2 : 3) && !keep.contains(key) {
+            keep.append(key)
         }
         guard keep != keptEngines else { return }
         keptEngines = keep
         engines = engines.filter { keep.contains($0.key) }
-        for quality in keep where engines[quality] == nil { loadEngine(quality) }
+        for key in keep where engines[key] == nil { loadEngine(key) }
     }
 
-    private func loadEngine(_ quality: Quality) {
-        guard !loadingEngines.contains(quality) else { return }
-        guard !failedEngines.contains(quality) else { return queue.async { [self] in engineFailed(quality) } }
-        loadingEngines.insert(quality)
+    private func loadEngine(_ key: EngineKey) {
+        guard !loadingEngines.contains(key) else { return }
+        guard !failedEngines.contains(key) else { return queue.async { [self] in engineFailed(key) } }
+        loadingEngines.insert(key)
         let store = modelStore
         Task { [self] in
             do {
-                let engine = try await StyleEngine.load(store: store, size: quality.size, mode: quality.mode)
+                let engine = try await Self.loadEngine(key, from: store)
                 queue.async { [self] in
-                    loadingEngines.remove(quality)
-                    if keptEngines.contains(quality) { engines[quality] = engine }
+                    loadingEngines.remove(key)
+                    if keptEngines.contains(key) { engines[key] = engine }
                 }
             } catch {
                 queue.async { [self] in
-                    loadingEngines.remove(quality)
-                    failedEngines.insert(quality)
-                    engineFailed(quality)
+                    loadingEngines.remove(key)
+                    failedEngines.insert(key)
+                    engineFailed(key)
                 }
                 record(error)
             }
         }
     }
 
-    private func engineFailed(_ quality: Quality) {
-        if adaptive.engineFailed(quality) { manageEngines() }
+    private static func loadEngine(_ key: EngineKey, from store: ModelStore) async throws -> StyleEngine {
+        try await StyleEngine.load(store: store, network: key.network, size: key.quality.size, mode: key.quality.mode)
+    }
+
+    /// A failed network other than classic falls back to classic at that size. A failed classic engine drops the
+    /// adaptive step.
+    private func engineFailed(_ key: EngineKey) {
+        if engineKey(for: key.quality) != key {
+            describeEngine()
+            manageEngines()
+        } else if adaptive.engineFailed(key.quality) {
+            manageEngines()
+        }
     }
 
     /// A trial runs on at most one frame at a time, after that frame's own inference.
     private func assignTrial(to job: Job, running engine: StyleEngine) {
-        guard !trialBusy, let quality = adaptive.trialQuality, let trialEngine = engines[quality] else { return }
+        guard !trialBusy, let quality = adaptive.trialQuality,
+              let trialEngine = engines[engineKey(for: quality)] else { return }
         if trialEngine.size != engine.size {
             guard let input = try? trialEngine.makeInputBuffer() else { return }
             job.trialInput = input

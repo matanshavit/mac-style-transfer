@@ -7,10 +7,11 @@ func runBench(_ arguments: Arguments) async throws {
     let store = ModelStore(directory: try arguments.url("models"))
     guard let size = ModelSize(try arguments.required("size")) else { throw UsageError(description: "--size expects WxH") }
     guard let mode = try arguments.choice("mode", as: EngineMode.self) else { throw UsageError(description: "missing --mode") }
+    let network = try arguments.choice("network", as: StyleNetwork.self) ?? .classic
     let iterations = try arguments.int("iters") ?? 300
 
     let loadStart = now()
-    let engine = try await StyleEngine.load(store: store, size: size, mode: mode)
+    let engine = try await StyleEngine.load(store: store, network: network, size: size, mode: mode)
     let loadMilliseconds = (now() - loadStart) * 1000
     let inflight = try arguments.int("inflight") ?? engine.maxConcurrentFrames
     let result = try await Task.detached { try benchmark(engine, iterations: iterations, inflight: inflight) }.value
@@ -21,7 +22,7 @@ func runBench(_ arguments: Arguments) async throws {
         return "\(device.rawValue) \(times.count) frames p50 \(format(percentile(times, 0.5))) ms"
     }
     let all = result.frames.map(\.milliseconds)
-    print("bench \(size) \(mode.rawValue): \(format(Double(iterations) / result.seconds, 1)) fps, "
+    print("bench \(size) \(mode.rawValue) \(network.rawValue): \(format(Double(iterations) / result.seconds, 1)) fps, "
         + "inference p50 \(format(percentile(all, 0.5))) p95 \(format(percentile(all, 0.95))) ms, inflight \(inflight), "
         + "load+warmup \(format(loadMilliseconds, 0)) ms; " + devices.joined(separator: ", "))
 }

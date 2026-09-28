@@ -18,6 +18,7 @@ func runPipeline(_ arguments: Arguments) async throws {
 
     var settings = PipelineSettings(style: style)
     settings.quality = try arguments.choice("quality", as: QualityPreset.self)?.quality ?? .balanced
+    settings.network = try arguments.choice("network", as: StyleNetwork.self) ?? .classic
     if let size = arguments.string("size") {
         guard let parsed = ModelSize(size) else { throw UsageError(description: "--size expects WxH") }
         settings.quality.size = parsed
@@ -58,9 +59,9 @@ func runPipeline(_ arguments: Arguments) async throws {
 
     print("input   \(source.url.lastPathComponent) \(source.width)x\(source.height) @ \(format(source.fileFrameRate, 0)) fps, "
         + "every \(source.frameStep) frame(s) -> \(format(source.frameRate, 1)) fps, \(realtime ? "realtime" : "as fast as possible")")
-    print("style   \(styleName) strength \(settings.strength) | \(settings.quality) | smoothing \(settings.smoothing) | "
-        + "\(settings.upsampling.rawValue) detail \(settings.detail) | preserve colors \(settings.preserveColors) | "
-        + "mask \(settings.mask.rawValue)")
+    print("style   \(styleName) strength \(settings.strength) | \(settings.quality) \(settings.network.rawValue) | "
+        + "smoothing \(settings.smoothing) | \(settings.upsampling.rawValue) detail \(settings.detail) | "
+        + "preserve colors \(settings.preserveColors) | mask \(settings.mask.rawValue)")
 
     let start = now()
     await withCheckedContinuation { continuation in
@@ -86,10 +87,12 @@ func runPipeline(_ arguments: Arguments) async throws {
         print(name.padding(toLength: 16, withPad: " ", startingAt: 0)
             + [percentile(values, 0.5), mean(values), percentile(values, 0.95)].map { format($0).leftPadded(8) }.joined())
     }
-    let byDevice = Dictionary(grouping: report.timings.filter { $0.device != nil }, by: { $0.device! })
-    print("devices " + byDevice.sorted { $0.key.rawValue > $1.key.rawValue }.map { device, timings in
+    let byEngine = Dictionary(grouping: report.timings.filter { $0.device != nil }) { timings in
+        [timings.device?.rawValue, timings.network?.rawValue].compactMap { $0 }.joined(separator: " ")
+    }
+    print("devices " + byEngine.sorted { $0.key > $1.key }.map { engine, timings in
         let inference = timings.map(\.inferenceMilliseconds)
-        return "\(device.rawValue) \(timings.count) frames, inference p50 \(format(percentile(inference, 0.5))) "
+        return "\(engine) \(timings.count) frames, inference p50 \(format(percentile(inference, 0.5))) "
             + "p95 \(format(percentile(inference, 0.95))) ms"
     }.joined(separator: "; "))
     print("static  flicker \(format(report.staticFlicker, 3)) levels over \(format(report.staticFraction * 100, 1))% of pixels")

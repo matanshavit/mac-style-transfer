@@ -22,8 +22,8 @@ public actor ModelStore {
 
     public static let predictorNames = ["MagentaPredictor_h256", "MagentaPredictor"]
 
-    public static func transformerName(for size: ModelSize) -> String {
-        "MagentaTransformer_\(size.width)x\(size.height)"
+    public static func transformerName(for network: StyleNetwork, size: ModelSize) -> String {
+        "\(network.modelPrefix)_\(size.width)x\(size.height)"
     }
 
     public nonisolated let locations: [Location]
@@ -41,8 +41,8 @@ public actor ModelStore {
         self.init(locations: [.directory(directory)])
     }
 
-    public nonisolated func availableTransformerSizes() -> [ModelSize] {
-        ModelSize.standard.filter { locate(Self.transformerName(for: $0)) != nil }
+    public nonisolated func availableTransformerSizes(for network: StyleNetwork) -> [ModelSize] {
+        ModelSize.standard.filter { locate(Self.transformerName(for: network, size: $0)) != nil }
     }
 
     /// URL of a compiled model, compiling an `.mlpackage` on first use.

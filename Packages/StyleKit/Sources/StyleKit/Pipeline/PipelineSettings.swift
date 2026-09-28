@@ -12,6 +12,8 @@ public enum MaskMode: String, Sendable, CaseIterable {
 
 public struct PipelineSettings: Sendable, Equatable {
     public var quality: Quality
+    /// Sizes without a model for this network, or whose model failed to load, run classic.
+    public var network: StyleNetwork
     /// Nil outputs the camera unchanged.
     public var style: StyleVector?
     /// 0...1. Interpolates the style vector toward the live frame's own vector.
@@ -28,10 +30,12 @@ public struct PipelineSettings: Sendable, Equatable {
     public var segmentationQuality: SegmentationQuality
     public var bypass: Bool
 
-    public init(quality: Quality = .auto, style: StyleVector? = nil, strength: Float = 0.75, smoothing: Float = 0.8,
-                upsampling: UpsamplingMode = .guided, detail: Float = 1, preserveColors: Bool = false,
-                mask: MaskMode = .everything, segmentationQuality: SegmentationQuality = .balanced, bypass: Bool = false) {
+    public init(quality: Quality = .auto, network: StyleNetwork = .steady, style: StyleVector? = nil,
+                strength: Float = 0.75, smoothing: Float = 0.8, upsampling: UpsamplingMode = .guided, detail: Float = 1,
+                preserveColors: Bool = false, mask: MaskMode = .everything,
+                segmentationQuality: SegmentationQuality = .balanced, bypass: Bool = false) {
         self.quality = quality
+        self.network = network
         self.style = style
         self.strength = strength
         self.smoothing = smoothing

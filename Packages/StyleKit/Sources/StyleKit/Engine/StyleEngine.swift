@@ -26,11 +26,12 @@ public struct StylizedFrame: @unchecked Sendable {
     public let inferenceMilliseconds: Double
 }
 
-/// Runs the Magenta transformer. In dual mode frames go to whichever instance is free (GPU first), and results are
+/// Runs a style transformer. In dual mode frames go to whichever instance is free (GPU first), and results are
 /// always delivered in submission order.
 public final class StyleEngine: @unchecked Sendable {
     public typealias Completion = @Sendable (Result<StylizedFrame, any Error>) -> Void
 
+    public let network: StyleNetwork
     public let size: ModelSize
     public let mode: EngineMode
 
@@ -70,8 +71,9 @@ public final class StyleEngine: @unchecked Sendable {
     private var nextDelivery = 0
     private var cachedStyle: (vector: StyleVector, array: MLMultiArray)?
 
-    public static func load(store: ModelStore, size: ModelSize, mode: EngineMode) async throws -> StyleEngine {
-        let name = [ModelStore.transformerName(for: size)]
+    public static func load(store: ModelStore, network: StyleNetwork, size: ModelSize,
+                            mode: EngineMode) async throws -> StyleEngine {
+        let name = [ModelStore.transformerName(for: network, size: size)]
         var instances: [Instance] = []
         if mode != .ane {
             let model = try await store.loadModel(named: name, computeUnits: .cpuAndGPU, lowPrecisionAccumulationOnGPU: true)
@@ -81,12 +83,12 @@ public final class StyleEngine: @unchecked Sendable {
             let model = try await store.loadModel(named: name, computeUnits: .cpuAndNeuralEngine)
             instances.append(Instance(device: .ane, model: model))
         }
-        let engine = try StyleEngine(size: size, mode: mode, instances: instances)
+        let engine = try StyleEngine(network: network, size: size, mode: mode, instances: instances)
         try await engine.warmUp()
         return engine
     }
 
-    private init(size: ModelSize, mode: EngineMode, instances: [Instance]) throws {
+    private init(network: StyleNetwork, size: ModelSize, mode: EngineMode, instances: [Instance]) throws {
         let description = instances[0].model.modelDescription
         guard let content = description.inputDescriptionsByName.values.first(where: { $0.imageConstraint != nil }),
               let style = description.inputDescriptionsByName.values.first(where: { $0.multiArrayConstraint != nil }),
@@ -96,6 +98,7 @@ public final class StyleEngine: @unchecked Sendable {
         guard let constraint = content.imageConstraint, constraint.pixelsWide == size.width, constraint.pixelsHigh == size.height else {
             throw StyleEngineError.unexpectedModel("content input is not \(size)")
         }
+        self.network = network
         self.size = size
         self.mode = mode
         self.instances = instances

@@ -43,6 +43,8 @@ final class AppModel {
     let preview = PreviewOutput()
     let extensionManager = ExtensionManager()
     let thumbnails = ThumbnailCache()
+    /// Sizes bundled with a steady model. The others run classic.
+    let steadySizes: [ModelSize]
 
     var preferences: Preferences {
         didSet { preferencesChanged(from: oldValue) }
@@ -93,8 +95,10 @@ final class AppModel {
         #endif
         cameraAuthorization = source == .camera ? Self.currentCameraAuthorization : .authorized
         virtualCamera = virtualCameraOutput.state
+        let modelStore = ModelStore(locations: [.bundle(.main)])
+        steadySizes = modelStore.availableTransformerSizes(for: .steady)
         do {
-            pipeline = try StylePipeline(modelStore: ModelStore(locations: [.bundle(.main)]))
+            pipeline = try StylePipeline(modelStore: modelStore)
         } catch {
             pipeline = nil
             setupError = "StyleCam cannot use this Mac’s GPU. " + Self.describe(error)
@@ -104,6 +108,11 @@ final class AppModel {
         loadTask = Task { await load() }
         virtualCameraOutput.connect()
         extensionManager.refresh()
+    }
+
+    /// Classic when the build has no steady models, whatever the preference.
+    var network: StyleNetwork {
+        steadySizes.isEmpty ? .classic : preferences.network
     }
 
     var selectedStyle: StyleInfo? {
@@ -575,10 +584,12 @@ final class AppModel {
 
     private func applyPipelineSettings() {
         let preferences = preferences
+        let network = network
         let style = preferences.isStylized ? styleVector : nil
         pipeline?.updateSettings { settings in
             settings.style = style
             settings.quality = preferences.quality.quality
+            settings.network = network
             settings.strength = Float(preferences.strength)
             settings.smoothing = Float(preferences.smoothing)
             settings.detail = Float(preferences.detail)

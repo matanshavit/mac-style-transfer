@@ -108,7 +108,7 @@ final class AdaptiveController {
         var inference: [Double] = []
     }
 
-    private let availableSizes: [ModelSize]
+    private var sizes: [ModelSize] = []
     private var conditions: SystemConditions
     private var preferred: Quality?
     private var steps: [Quality] = []
@@ -124,8 +124,7 @@ final class AdaptiveController {
     private var lastArrival: CMTime?
     private var intervals: [Double] = []
 
-    init(availableSizes: [ModelSize], conditions: SystemConditions) {
-        self.availableSizes = availableSizes
+    init(conditions: SystemConditions) {
         self.conditions = conditions
     }
 
@@ -143,9 +142,10 @@ final class AdaptiveController {
         return steps[step + 1]
     }
 
-    /// The engine configuration to run for an adaptive `quality`. `current` is the engine that ran last.
-    func target(for quality: Quality, current: Quality?, now: Double) -> Quality {
-        if quality != preferred { start(quality, current: current, now: now) }
+    /// The engine configuration to run for an adaptive `quality`, using the model `sizes`. `current` is the engine that
+    /// ran last.
+    func target(for quality: Quality, sizes: [ModelSize], current: Quality?, now: Double) -> Quality {
+        if quality != preferred || sizes != self.sizes { start(quality, sizes: sizes, current: current, now: now) }
         return steps[step]
     }
 
@@ -263,9 +263,10 @@ final class AdaptiveController {
 
     /// Keeps the running engine when it is one of the steps. Otherwise starts on the Neural Engine and tries the
     /// preferred configuration once that step fits its budget, so a busy GPU does not drop frames at startup.
-    private func start(_ quality: Quality, current: Quality?, now: Double) {
+    private func start(_ quality: Quality, sizes: [ModelSize], current: Quality?, now: Double) {
         preferred = quality
-        steps = Self.steps(for: quality, available: availableSizes)
+        self.sizes = sizes
+        steps = Self.steps(for: quality, available: sizes)
         if let current, let index = steps.firstIndex(of: current), index >= floor {
             step = index
         } else {

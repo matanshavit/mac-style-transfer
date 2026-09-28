@@ -13,6 +13,11 @@ struct ControlsPanel: View {
                     PercentSlider(title: "Strength", value: $model.preferences.strength)
                     PercentSlider(title: "Smoothing", value: $model.preferences.smoothing)
                     PercentSlider(title: "Detail", value: $model.preferences.detail)
+                    Toggle(isOn: steadyBrushwork) {
+                        Text("Steady brushwork")
+                        Text(steadyBrushworkNote)
+                    }
+                    .disabled(model.steadySizes.isEmpty)
                     Toggle("Preserve colors", isOn: $model.preferences.preserveColors)
                     Picker("Apply to", selection: $model.preferences.mask) {
                         Text("Everything").tag(MaskMode.everything)
@@ -58,6 +63,22 @@ struct ControlsPanel: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var steadyBrushwork: Binding<Bool> {
+        Binding {
+            model.network == .steady
+        } set: { steady in
+            model.preferences.network = steady ? .steady : .classic
+        }
+    }
+
+    private var steadyBrushworkNote: String {
+        let missing = ModelSize.standard.filter { !model.steadySizes.contains($0) }
+        if missing.count == ModelSize.standard.count { return "This build has no steady models." }
+        let note = "Less shimmer on still areas and when you move. Slightly softer fine texture."
+        guard !missing.isEmpty else { return note }
+        return note + " Classic runs at \(missing.map(\.description).formatted(.list(type: .and)))."
     }
 
     private static func describe(_ quality: Quality) -> String {

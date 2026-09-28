@@ -8,6 +8,7 @@ struct Preferences: Equatable {
     /// The last painting picked, so toggling the style off and on restores it.
     var lastStyleID: String?
     var quality = QualityPreset.auto
+    var network = StyleNetwork.steady
     var strength = Double(PipelineSettings().strength)
     var smoothing = Double(PipelineSettings().smoothing)
     var detail = Double(PipelineSettings().detail)
@@ -27,6 +28,7 @@ extension Preferences {
         static let style = "styleID"
         static let lastStyle = "lastStyleID"
         static let quality = "quality"
+        static let network = "network"
         static let strength = "strength"
         static let smoothing = "smoothing"
         static let detail = "detail"
@@ -43,6 +45,7 @@ extension Preferences {
         styleID = defaults.string(forKey: Key.style) ?? styleID
         lastStyleID = defaults.string(forKey: Key.lastStyle)
         quality = defaults.string(forKey: Key.quality).flatMap(QualityPreset.init(rawValue:)) ?? quality
+        network = defaults.string(forKey: Key.network).flatMap(StyleNetwork.init(rawValue:)) ?? network
         strength = defaults.object(forKey: Key.strength) as? Double ?? strength
         smoothing = defaults.object(forKey: Key.smoothing) as? Double ?? smoothing
         detail = defaults.object(forKey: Key.detail) as? Double ?? detail
@@ -58,6 +61,7 @@ extension Preferences {
         defaults.set(styleID, forKey: Key.style)
         defaults.set(lastStyleID, forKey: Key.lastStyle)
         defaults.set(quality.rawValue, forKey: Key.quality)
+        defaults.set(network.rawValue, forKey: Key.network)
         defaults.set(strength, forKey: Key.strength)
         defaults.set(smoothing, forKey: Key.smoothing)
         defaults.set(detail, forKey: Key.detail)

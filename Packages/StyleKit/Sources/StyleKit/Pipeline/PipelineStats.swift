@@ -13,6 +13,7 @@ public struct FrameTimings: Sendable {
     /// From capture (the frame's host time) to output.
     public var latencyMilliseconds: Double = 0
     public var device: ComputeDevice?
+    public var network: StyleNetwork?
 }
 
 public struct PipelineStats: Sendable {
@@ -23,7 +24,8 @@ public struct PipelineStats: Sendable {
     /// Frames dropped since the previous stats update.
     public var droppedFrames: Int
     public var totalDroppedFrames: Int
-    /// For example "960x540 gpu", or nil while bypassing.
+    /// For example "960x540 gpu steady", or "480x270 ane classic (no steady model)" when the chosen network has no
+    /// model at that size. Nil while bypassing.
     public var engine: String?
     /// What an adaptive quality runs or is switching to, and why. Nil for a fixed quality.
     public var adaptive: AdaptiveDecision?
