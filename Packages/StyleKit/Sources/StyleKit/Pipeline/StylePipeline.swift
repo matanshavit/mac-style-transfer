@@ -217,14 +217,30 @@ public final class StylePipeline: @unchecked Sendable {
     /// Loads the engine for the current quality and the style predictor, so the first frames are stylized.
     /// Without it they are loaded on demand and frames pass through unstylized meanwhile.
     public func prepare() async throws {
-        let key = await withCheckedContinuation { continuation in
+        let wanted = await withCheckedContinuation { continuation in
             queue.async { [self] in
                 let settings = settings
                 network = settings.network
                 continuation.resume(returning: engineKey(for: engineQuality(for: settings.quality)))
             }
         }
-        let engine = try await Self.loadEngine(key, from: modelStore)
+        let key: EngineKey
+        let engine: StyleEngine
+        do {
+            engine = try await Self.loadEngine(wanted, from: modelStore)
+            key = wanted
+        } catch {
+            let fallback = await withCheckedContinuation { continuation in
+                queue.async { [self] in
+                    failedEngines.insert(wanted)
+                    continuation.resume(returning: engineKey(for: wanted.quality))
+                }
+            }
+            guard fallback != wanted else { throw error }
+            record(error)
+            engine = try await Self.loadEngine(fallback, from: modelStore)
+            key = fallback
+        }
         let predictor = try await StylePredictor.load(from: modelStore)
         await withCheckedContinuation { continuation in
             queue.async { [self] in
