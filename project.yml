@@ -79,6 +79,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.matanshavit.StyleCam.Extension
+        PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
         CODE_SIGN_ENTITLEMENTS: Extension/StyleCamExtension.entitlements
         SKIP_INSTALL: YES
 

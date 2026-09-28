@@ -1,0 +1,83 @@
+import CoreMedia
+import Synchronization
+
+public struct FrameTimings: Sendable {
+    /// GPU time of the downscale pass.
+    public var downscaleMilliseconds: Double = 0
+    /// Wall time of the transformer prediction.
+    public var inferenceMilliseconds: Double = 0
+    /// GPU time of smoothing, upsampling, compositing and NV12 conversion.
+    public var postMilliseconds: Double = 0
+    /// From admission into the pipeline to output.
+    public var totalMilliseconds: Double = 0
+    /// From capture (the frame's host time) to output.
+    public var latencyMilliseconds: Double = 0
+    public var device: ComputeDevice?
+    public var network: StyleNetwork?
+}
+
+public struct PipelineStats: Sendable {
+    public var outputFPS: Double
+    public var inferenceMillisecondsP50: Double
+    public var latencyMillisecondsP50: Double
+    /// Frames dropped since the previous stats update.
+    public var droppedFrames: Int
+    public var totalDroppedFrames: Int
+    /// For example "960x540 gpu steady", or "480x270 ane classic (no steady model)" when the chosen network has no
+    /// model at that size. Nil while frames pass through.
+    public var engine: String?
+    /// What an adaptive quality runs or is switching to, and why. Nil for a fixed quality.
+    public var adaptive: AdaptiveDecision?
+    public var lastError: String?
+}
+
+final class StatsCollector: Sendable {
+    private struct Window {
+        var start = HostClock.now()
+        var output = 0
+        var dropped = 0
+        var totalDropped = 0
+        var inference: [Double] = []
+        var latency: [Double] = []
+    }
+
+    private let window = Mutex(Window())
+
+    func recordDrop() {
+        window.withLock {
+            $0.dropped += 1
+            $0.totalDropped += 1
+        }
+    }
+
+    func recordOutput(_ timings: FrameTimings) {
+        window.withLock {
+            $0.output += 1
+            if timings.device != nil { $0.inference.append(timings.inferenceMilliseconds) }
+            $0.latency.append(timings.latencyMilliseconds)
+        }
+    }
+
+    func snapshot(engine: String?, adaptive: AdaptiveDecision?, lastError: String?) -> PipelineStats {
+        window.withLock { window in
+            let now = HostClock.now()
+            let seconds = max((now - window.start).seconds, 1e-3)
+            let stats = PipelineStats(
+                outputFPS: Double(window.output) / seconds, inferenceMillisecondsP50: median(window.inference),
+                latencyMillisecondsP50: median(window.latency), droppedFrames: window.dropped,
+                totalDroppedFrames: window.totalDropped, engine: engine, adaptive: adaptive, lastError: lastError)
+            window = Window(start: now, totalDropped: window.totalDropped)
+            return stats
+        }
+    }
+}
+
+func median(_ values: [Double]) -> Double {
+    percentile(values, 0.5)
+}
+
+func percentile(_ values: [Double], _ fraction: Double) -> Double {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
+    return sorted[min(sorted.count - 1, Int((fraction * Double(sorted.count - 1)).rounded()))]
+}

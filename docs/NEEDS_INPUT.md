@@ -2,10 +2,10 @@
 
 Things I cannot do or decide alone. Most important first.
 
-1. **Apple Developer Program (paid, $99/yr).** Needed to install the camera extension, even just on your own Mac. Free Personal Teams cannot get the System Extension entitlement ([Apple capability table](https://developer.apple.com/help/account/reference/supported-capabilities-macos)). After you enroll:
-   - Sign in to Xcode (Settings > Accounts).
-   - Copy `Config/Local.xcconfig.example` to `Config/Local.xcconfig` and set your team ID.
-   - Build once from Xcode so it creates the provisioning profile.
-2. **Camera permission.** The first run shows a macOS camera prompt. Only you can click it.
-3. **Extension approval.** The first install asks you to allow the extension in System Settings > General > Login Items & Extensions > Camera Extensions.
-4. **Copyrighted styles.** Christina's World (Wyeth, died 2009) and O'Keeffe's "Music, Pink and Blue No. 2" (from the old app) are still under copyright in many places. I left them out of the repo. The app can still load them from a URL at runtime, like the old app did. OK?
+Done: developer team set up (`Config/Local.xcconfig`, gitignored), `make install` signs and installs, the camera extension is approved, and Photo Booth shows the stylized video through the StyleCam camera.
+
+1. **Try a real call.** Pick StyleCam in FaceTime, Zoom or Meet. Tell me how smooth it looks, and whether the other side sees it the right way round (your own preview is mirrored by the call app, which is normal).
+2. **A look at the real UI.** Window snapshots cannot show the toolbar, the menu bar menu, the Settings window or alerts. Please check those, and try Open at login in Settings (the window should stay closed after you log in).
+3. **Copyrighted styles.** Christina's World (Wyeth, died 2009) and O'Keeffe's "Music, Pink and Blue No. 2" (from the old app) are still under copyright in many places, so they are not in the repo. You can still add them from a link in the app. OK?
+4. **Auto quality on battery.** I cannot unplug the Mac or turn on Low Power Mode from here. Run `stylecam-cli run --models Models --styles Styles --style starry_night --input <file.y4m> --out /tmp/out.mp4 --realtime --quality auto --log-adaptive` on battery and with Low Power Mode on. It should print `on battery` or `Low Power Mode` and stay on `ane`. Send me the log.
+5. **OBS output (optional, untested).** Only useful on a Mac without the StyleCam camera. Steps are in the app's Virtual Camera section when Output is set to OBS.
