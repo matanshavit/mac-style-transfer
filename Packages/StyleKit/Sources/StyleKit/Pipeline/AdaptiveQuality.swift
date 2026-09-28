@@ -19,6 +19,7 @@ public enum AdaptiveReason: Sendable, Equatable, CustomStringConvertible {
     /// A trial run of this configuration next to the one below fit.
     case trialFit(milliseconds: Double, limit: Double)
     case trialTooSlow(Quality, milliseconds: Double, limit: Double)
+    case engineFailed(Quality)
     case lowPowerMode
     case batteryPower
     case thermalState(ProcessInfo.ThermalState)
@@ -32,6 +33,7 @@ public enum AdaptiveReason: Sendable, Equatable, CustomStringConvertible {
         case .trialFit(let milliseconds, let limit): "trial took \(Self.format(milliseconds)) ms, limit \(Self.format(limit)) ms"
         case .trialTooSlow(let quality, let milliseconds, let limit):
             "\(quality) trial took \(Self.format(milliseconds)) ms, limit \(Self.format(limit)) ms"
+        case .engineFailed(let quality): "\(quality) failed to load"
         case .lowPowerMode: "Low Power Mode"
         case .batteryPower: "on battery"
         case .thermalState(let state): "thermal state \(Self.name(state))"
@@ -75,7 +77,9 @@ public enum AdaptiveEvent: Sendable, CustomStringConvertible {
 ///
 /// Steps down after a window of frames whose p50 misses the budget. Steps up only after a trial: the higher step runs
 /// on copies of the frames while the current step keeps producing output, so a busy GPU never shows as a stutter.
-/// Failed trials back off from 20 s to 160 s. No step-down happens while a trial runs, which takes about a second.
+/// A trial starts only from a step that fits its budget, and failed trials back off from 20 s to 160 s. No step-down
+/// happens while a trial runs, which takes about a second, and the window starts over after it because the trial
+/// slows the running step.
 final class AdaptiveController {
     static let budgetFraction = 0.65
     static let trialFraction = 0.9
@@ -154,15 +158,14 @@ final class AdaptiveController {
         return preferred != nil
     }
 
-    /// The preferred configuration, then its size on the Neural Engine, then each smaller size down to 640x360 on the
+    /// The preferred configuration, then its size on the Neural Engine, then each smaller size down to 480x270 on the
     /// Neural Engine, skipping sizes without a model.
     static func steps(for quality: Quality, available: [ModelSize]) -> [Quality] {
-        func area(_ size: ModelSize) -> Int { size.width * size.height }
         var steps = [quality.fixed]
         if quality.mode != .ane { steps.append(Quality(size: quality.size, mode: .ane)) }
         steps += available
-            .filter { area($0) < area(quality.size) && area($0) >= area(.size640x360) }
-            .sorted { area($0) > area($1) }
+            .filter { $0.pixels < quality.size.pixels && $0.pixels >= ModelSize.size480x270.pixels }
+            .sorted { $0.pixels > $1.pixels }
             .map { Quality(size: $0, mode: .ane) }
         let usable = steps.filter { available.contains($0.size) }
         return usable.isEmpty ? [quality.fixed] : usable
@@ -181,7 +184,7 @@ final class AdaptiveController {
     func recordFrame(on quality: Quality, inference: Double, total: Double, now: Double) {
         guard preferred != nil, quality == steps[step] else { return }
         if let trial, now - trial.started > Self.trialTimeout {
-            self.trial = nil
+            endTrial()
             backOff(now)
         }
         settled += 1
@@ -189,13 +192,12 @@ final class AdaptiveController {
         if stepStart == nil { stepStart = now }
         samples.append(Sample(time: now, inference: inference, total: total))
         samples.removeAll { now - $0.time > Self.window }
-        startTrialIfDue(now)
 
-        guard trial == nil, let interval = frameInterval, let stepStart, now - stepStart >= Self.window,
-              step + 1 < steps.count else { return }
+        guard trial == nil, let interval = frameInterval, let stepStart, now - stepStart >= Self.window else { return }
         let milliseconds = median(samples.map(\.total))
         let budget = budget(for: quality, interval: interval)
-        guard milliseconds > budget else { return }
+        guard milliseconds > budget else { return startTrialIfDue(now, interval: interval) }
+        guard step + 1 < steps.count else { return }
         if steppedUp.map({ now - $0 >= Self.quickFallback }) ?? true { trialDelay = Self.firstTrialDelay }
         backOff(now)
         steppedUp = nil
@@ -209,7 +211,6 @@ final class AdaptiveController {
         if trial.seen > Self.trialSettleFrames { trial.inference.append(inference) }
         self.trial = trial
         guard trial.inference.count >= Self.trialFrames, let interval = frameInterval else { return }
-        self.trial = nil
 
         let overhead = samples.isEmpty ? 0 : max(0, median(samples.map(\.total)) - median(samples.map(\.inference)))
         let milliseconds = median(trial.inference) + overhead
@@ -219,9 +220,28 @@ final class AdaptiveController {
             nextTrial = now + trialDelay
             move(to: trial.step, reason: trial.step == 0 ? .preferred : .trialFit(milliseconds: milliseconds, limit: limit))
         } else {
+            endTrial()
             backOff(now)
             setReason(.trialTooSlow(quality, milliseconds: milliseconds, limit: limit))
         }
+    }
+
+    /// Drops a configuration whose engine failed to load. Returns whether it was one of the steps.
+    func engineFailed(_ quality: Quality) -> Bool {
+        guard preferred != nil, steps.count > 1, let index = steps.firstIndex(of: quality) else { return false }
+        steps.remove(at: index)
+        if index == step {
+            move(to: min(step, steps.count - 1), reason: .engineFailed(quality))
+        } else if index < step {
+            step -= 1
+            if trial?.step == index {
+                trial = nil
+                setReason(.engineFailed(quality))
+            } else {
+                trial?.step -= 1
+            }
+        }
+        return true
     }
 
     func update(_ conditions: SystemConditions, now: Double) {
@@ -229,7 +249,7 @@ final class AdaptiveController {
         let previousFloor = floor
         self.conditions = conditions
         guard preferred != nil else { return }
-        if let trial, trial.step < floor { self.trial = nil }
+        if let trial, trial.step < floor { endTrial() }
         if step < floor, let reason = conditions.reason {
             move(to: floor, reason: reason)
         } else if floor < previousFloor {
@@ -242,7 +262,7 @@ final class AdaptiveController {
     }
 
     /// Keeps the running engine when it is one of the steps. Otherwise starts on the Neural Engine and tries the
-    /// preferred configuration at once, so a busy GPU does not drop frames at startup.
+    /// preferred configuration once that step fits its budget, so a busy GPU does not drop frames at startup.
     private func start(_ quality: Quality, current: Quality?, now: Double) {
         preferred = quality
         steps = Self.steps(for: quality, available: availableSizes)
@@ -274,10 +294,23 @@ final class AdaptiveController {
         Self.budgetFraction * interval * 1000 * (quality.mode == .dual ? 2 : 1)
     }
 
-    private func startTrialIfDue(_ now: Double) {
-        guard trial == nil, step > floor, now >= nextTrial else { return }
+    /// A trial on the device that runs the current step waits until that device has time for both in a frame
+    /// interval, or it would delay the output. Its time is estimated from the current step's by pixel count.
+    private func startTrialIfDue(_ now: Double, interval: Double) {
+        guard step > floor, now >= nextTrial else { return }
+        let current = steps[step], next = steps[step - 1]
+        if next.mode == current.mode {
+            let inference = median(samples.map(\.inference))
+            let expected = inference * Double(next.size.pixels) / Double(current.size.pixels)
+            guard inference + expected <= interval * 1000 else { return }
+        }
         trial = Trial(step: step - 1, started: now)
-        onEvent?(.trialStarted(steps[step - 1]))
+        onEvent?(.trialStarted(next))
+    }
+
+    private func endTrial() {
+        trial = nil
+        resetStep()
     }
 
     private func backOff(_ now: Double) {
@@ -308,4 +341,8 @@ final class AdaptiveController {
     private func emitDecision() {
         if let decision { onEvent?(.decided(decision)) }
     }
+}
+
+private extension ModelSize {
+    var pixels: Int { width * height }
 }

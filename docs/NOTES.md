@@ -46,16 +46,19 @@ Camera extension: sink stream -> source stream -> Zoom / Meet / FaceTime
 5. **XcodeGen** generates the Xcode project (`project.yml`). The `.xcodeproj` is not committed.
 6. **Signing**: team ID lives in `Config/Local.xcconfig` (gitignored). Without a team, the app builds and runs locally (preview only), and the extension cannot be installed.
 7. Later: smaller per-painting networks trained on this Mac (PyTorch MPS) with a stability loss, if they beat Magenta on speed or look.
-8. **Auto quality is the default** (`Quality.auto`). Steps: 960x540 GPU, 960x540 ANE, 640x360 ANE. The budget is 65% of the camera frame interval (21.7 ms at 30 fps), checked on the p50 of admission-to-output time over 1.5 s. Over budget: go one step down. The next step down is loaded ahead, so the switch drops at most one frame.
-   - Going up needs a trial. The higher step runs on copies of the frames next to the step that feeds the output, and must fit 90% of the budget. So a trial of a busy GPU never shows as a stutter. Trials run at start, then 20 s after a step down, and back off to 160 s.
-   - It starts on the ANE and tries the GPU right away. A busy GPU drops nothing at startup, and a free one takes over in about 1 s.
+8. **Auto quality is the default** (`Quality.auto`). Steps: 960x540 GPU, 960x540 ANE, 640x360 ANE, 480x270 ANE. 480x270 is the last resort for when the ANE is busy too: smooth comes before pretty. The budget is 65% of the camera frame interval (21.7 ms at 30 fps), checked on the p50 of admission-to-output time over 1.5 s. Over budget: go one step down. The next step down stays loaded, so the switch drops at most one frame.
+   - Going up needs a trial. The higher step runs on copies of the frames next to the step that feeds the output, and must fit 90% of the budget. A trial only starts once the current step fits its budget. A trial on the ANE from a smaller ANE step also needs the ANE to have time for both frames (estimated by pixel count), so the trial does not hold up output frames. At 60 fps that rules out ANE trials. Trials run at start, then 20 s after a step down, and back off to 160 s.
+   - A trial slows the running step a little (a GPU trial delays our own GPU passes by about 2 ms). So there is no step down during a trial, and the 1.5 s window starts over after it.
+   - It starts on the ANE and tries the GPU once the ANE step fits. A busy GPU drops nothing at startup. A free one takes over after the first window plus the trial, about 2.5 s at 30 fps.
    - On battery, in Low Power Mode, or at thermal state serious or critical, it uses the ANE only.
-   - At most two engines stay loaded: the running one and the next one (a switch target, a trial, or the fallback). Engines that are not needed are unloaded.
+   - At most two engines stay loaded, the running one and the next one (a switch target or the fallback), plus the trial while one runs. Engines that are not needed are unloaded.
+   - A step whose engine fails to load is skipped. There is no retry.
    - It only adapts in real-time runs (`.dropFrames`). Offline runs use the preferred step.
 
 ## Measurements
 
 - With a PyTorch training job on the GPU: `balanced` (960x540 GPU) runs 25.8 fps, 41 of 301 frames dropped, latency p50 53 ms. `auto` runs 960x540 ANE at 30 fps, latency p50 18.5 ms. It drops 0-3 frames per 10 s, the same as a fixed 960x540 ANE run.
+- With the ANE busy too (a second process running 1280x720 on the ANE): 960x540 ANE and 640x360 ANE both take about 60 ms. Auto reaches 480x270 ANE in 3.4 s and holds there at 19 ms, 2 drops in 41 s.
 - **ANE clock-down.** While the GPU is busy, paced ANE runs at its back-to-back speed: 640x360 takes 7.0 ms at 10, 30 and 60 fps, and 960x540 takes 15.7 ms. I could not reproduce the earlier 12.9 ms (about 2x) while the training job ran, so it likely needs an otherwise idle Mac. Auto uses the ANE when the GPU is busy (then the ANE is at full speed) or to save power (then being slower is OK). `specializationStrategy = .fastPrediction` changed nothing (within 3%). Extra ANE requests to keep it warm would only burn power. Not done. Not measured yet: 960x540 ANE paced on an idle Mac. If it is over budget, auto on battery ends up at 640x360.
 - **Leftover stalls under the training job.** About once per 15-45 s, every thread in our process stalls for 50-150 ms at the same time: Metal encode calls, Metal completion handlers, and the source timer. Our GPU and ANE work stays fast, and command buffers wait less than 15 ms for the GPU. It also happens with fixed ANE settings. Likely cause: kernel contention from the training job, which has 29.6 GB wired. Not verified, not fixed.
 

@@ -19,8 +19,8 @@ public struct ProcessedFrame: @unchecked Sendable {
 /// waiting one, so latency never queues up; in `.waitForSlot` mode the source's thread blocks instead (for offline runs).
 ///
 /// An adaptive quality only adapts in `.dropFrames` mode; `.waitForSlot` runs its preferred configuration. At most two
-/// engines stay loaded: the running one and the next one, which is the one being switched to, an adaptive trial, or
-/// the adaptive fallback.
+/// engines stay loaded, the running one and the one being switched to or the adaptive fallback, plus an adaptive trial
+/// while one runs.
 public final class StylePipeline: @unchecked Sendable {
     public enum Backpressure: Sendable {
         case dropFrames
@@ -477,13 +477,14 @@ public final class StylePipeline: @unchecked Sendable {
         renderer.resetHistory()
     }
 
-    /// Keeps the engine that ran last and the one wanted next, or else the adaptive trial or fallback, and unloads the
-    /// rest. An engine still referenced by frames in flight is freed when they finish.
+    /// Keeps the engine that ran last and the one wanted next or else the adaptive fallback, plus the adaptive trial,
+    /// and unloads the rest. An engine still referenced by frames in flight is freed when they finish.
     private func manageEngines() {
         var keep: [Quality] = []
         let wanted = adaptive.decision?.quality ?? wantedQuality
-        for quality in [currentQuality, wanted, adaptive.trialQuality ?? adaptive.fallback].compactMap({ $0 })
-        where keep.count < 2 && !keep.contains(quality) {
+        let trial = adaptive.trialQuality
+        for quality in [currentQuality, wanted, trial, adaptive.fallback].compactMap({ $0 })
+        where keep.count < (trial == nil ? 2 : 3) && !keep.contains(quality) {
             keep.append(quality)
         }
         guard keep != keptEngines else { return }
@@ -493,7 +494,8 @@ public final class StylePipeline: @unchecked Sendable {
     }
 
     private func loadEngine(_ quality: Quality) {
-        guard !loadingEngines.contains(quality), !failedEngines.contains(quality) else { return }
+        guard !loadingEngines.contains(quality) else { return }
+        guard !failedEngines.contains(quality) else { return queue.async { [self] in engineFailed(quality) } }
         loadingEngines.insert(quality)
         let store = modelStore
         Task { [self] in
@@ -507,10 +509,15 @@ public final class StylePipeline: @unchecked Sendable {
                 queue.async { [self] in
                     loadingEngines.remove(quality)
                     failedEngines.insert(quality)
+                    engineFailed(quality)
                 }
                 record(error)
             }
         }
+    }
+
+    private func engineFailed(_ quality: Quality) {
+        if adaptive.engineFailed(quality) { manageEngines() }
     }
 
     /// A trial runs on at most one frame at a time, after that frame's own inference.

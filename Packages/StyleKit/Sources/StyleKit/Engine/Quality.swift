@@ -34,7 +34,7 @@ public struct Quality: Hashable, Sendable, CustomStringConvertible {
     public var size: ModelSize
     public var mode: EngineMode
     /// Makes `size` on `mode` the preferred configuration instead of a fixed one. A real-time pipeline then steps down
-    /// to `size` on the Neural Engine and on to smaller sizes (down to 640x360) when frames miss their time budget, and
+    /// to `size` on the Neural Engine and on to smaller sizes (down to 480x270) when frames miss their time budget, and
     /// keeps the GPU free in Low Power Mode, on battery, or when the Mac is hot.
     public var adaptive: Bool
 
