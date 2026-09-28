@@ -39,6 +39,8 @@ public struct Quality: Hashable, Sendable, CustomStringConvertible {
         self.mode = mode
     }
 
+    /// Leaves the GPU to other apps. At 30 fps it is not faster than `balanced`: the Neural Engine is slower when it
+    /// idles between frames, and a paced 640x360 frame takes about twice its back-to-back time.
     public static let fast = Quality(size: .size640x360, mode: .ane)
     public static let balanced = Quality(size: .size960x540, mode: .gpu)
     public static let max = Quality(size: .size1280x720, mode: .dual)

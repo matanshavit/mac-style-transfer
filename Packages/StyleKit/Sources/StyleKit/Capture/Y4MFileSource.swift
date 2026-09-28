@@ -42,12 +42,14 @@ public final class Y4MFileSource: FrameSource, @unchecked Sendable {
 
     /// Frames a full run emits, or nil when looping without a frame limit.
     public var outputFrameCount: Int? {
-        let perPass = (fileFrameCount + frameStep - 1) / frameStep
         if loops { return maxFrames }
-        return min(perPass, maxFrames ?? perPass)
+        return min(framesPerPass, maxFrames ?? framesPerPass)
     }
 
+    private var framesPerPass: Int { (fileFrameCount + frameStep - 1) / frameStep }
+
     public var skippedFrames: Int { state.withLock { $0.skipped } }
+    public var emittedFrames: Int { state.withLock { $0.emitted } }
 
     private struct RunState {
         var generation = 0
@@ -77,7 +79,7 @@ public final class Y4MFileSource: FrameSource, @unchecked Sendable {
         let tokens = header.split(separator: " ")
         guard tokens.first == "YUV4MPEG2" else { throw Y4MError.invalidHeader("missing YUV4MPEG2 signature") }
         var width = 0, height = 0, rateNumerator = 30, rateDenominator = 1
-        var colorspace = "420jpeg", fullRange = true
+        var colorspace = "420jpeg", fullRange = false
         for token in tokens.dropFirst() {
             let value = token.dropFirst()
             switch token.first {
@@ -87,7 +89,7 @@ public final class Y4MFileSource: FrameSource, @unchecked Sendable {
                 let parts = value.split(separator: ":").compactMap { Int($0) }
                 if parts.count == 2, parts[0] > 0, parts[1] > 0 { (rateNumerator, rateDenominator) = (parts[0], parts[1]) }
             case "C": colorspace = String(value)
-            case "X": if value == "COLORRANGE=LIMITED" { fullRange = false }
+            case "X": if value == "COLORRANGE=FULL" { fullRange = true }
             default: break
             }
         }
@@ -181,10 +183,11 @@ public final class Y4MFileSource: FrameSource, @unchecked Sendable {
         state.withLock { state -> Int? in
             if let maxFrames, state.emitted >= maxFrames { return nil }
             if let due, due > state.next {
-                state.skipped += due - state.next
-                state.next = due
+                let target = loops ? due : min(due, framesPerPass)
+                state.skipped += target - state.next
+                state.next = target
             }
-            guard loops || state.next * frameStep < fileFrameCount else { return nil }
+            guard loops || state.next < framesPerPass else { return nil }
             defer {
                 state.next += 1
                 state.emitted += 1

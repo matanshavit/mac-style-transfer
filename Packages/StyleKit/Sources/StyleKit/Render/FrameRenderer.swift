@@ -27,6 +27,7 @@ private struct CompositeUniforms {
     var preserveColors: UInt32
     var maskMode: UInt32
     var hasMask: UInt32
+    var passthrough: UInt32
 }
 
 struct PostOptions {
@@ -47,6 +48,7 @@ final class FrameRenderer {
     static let guidedEpsilon: Float = 4e-4
     static let maxGuidedCoefficient: Float = 2
     static let maskFeatherPixels: Float = 4
+    static let toneSigma: Float = 6
 
     let context: MetalContext
     let outputWidth: Int
@@ -60,6 +62,8 @@ final class FrameRenderer {
         let motion: any MTLTexture
         let coefficients: any MTLTexture
         let meanCoefficients: any MTLTexture
+        let cameraTone: any MTLTexture
+        let styledTone: any MTLTexture
         var current = 0
         var valid = false
 
@@ -71,6 +75,8 @@ final class FrameRenderer {
             motion = context.makeTexture(width: width, height: height, format: .r16Float)
             coefficients = context.makeTexture(width: width, height: height, format: .rgba16Float)
             meanCoefficients = context.makeTexture(width: width, height: height, format: .rgba16Float)
+            cameraTone = context.makeTexture(width: width, height: height, format: .r16Float)
+            styledTone = context.makeTexture(width: width, height: height, format: .rgba16Float)
         }
     }
 
@@ -81,7 +87,7 @@ final class FrameRenderer {
     private let coefficientPipeline: any MTLComputePipelineState
     private let boxPipeline: any MTLComputePipelineState
     private let compositePipeline: any MTLComputePipelineState
-    private let bypassPipeline: any MTLComputePipelineState
+    private let toneBlur: MPSImageGaussianBlur
     private let placeholder: any MTLTexture
     private let motionSums: [any MTLBuffer]
     private var motionSumIndex = 0
@@ -94,12 +100,14 @@ final class FrameRenderer {
         outputPool = try PixelBufferPool(width: outputWidth, height: outputHeight,
                                          pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, minimumBufferCount: 4)
         downscaler = MPSImageLanczosScale(device: context.device)
+        downscaler.edgeMode = .clamp
         motionPipeline = try context.pipeline("motion_luma")
         blendPipeline = try context.pipeline("temporal_blend")
         coefficientPipeline = try context.pipeline("guided_coefficients")
         boxPipeline = try context.pipeline("box_filter")
         compositePipeline = try context.pipeline("composite_nv12")
-        bypassPipeline = try context.pipeline("camera_nv12")
+        toneBlur = MPSImageGaussianBlur(device: context.device, sigma: Self.toneSigma)
+        toneBlur.edgeMode = .clamp
         placeholder = context.makeTexture(width: 1, height: 1, format: .r8Unorm)
         motionSums = (0..<4).map { _ in context.device.makeBuffer(length: 4, options: .storageModeShared)! }
     }
@@ -126,8 +134,8 @@ final class FrameRenderer {
         return owners
     }
 
-    /// Smoothing, upsampling, compositing and NV12 conversion in one encoder. Returns the output and the textures the
-    /// command buffer must keep alive.
+    /// Smoothing, upsampling, compositing and NV12 conversion. Returns the output and the textures the command buffer
+    /// must keep alive.
     func encodeStylized(camera: CVPixelBuffer, input: CVPixelBuffer, stylized: CVPixelBuffer, mask: (any MTLTexture)?,
                         options: PostOptions, commandBuffer: any MTLCommandBuffer) throws -> (CVPixelBuffer, [CVMetalTexture]) {
         let history = history(width: stylized.width, height: stylized.height)
@@ -141,7 +149,7 @@ final class FrameRenderer {
         motionSumIndex = (motionSumIndex + 1) % motionSums.count
         motionSum.contents().storeBytes(of: 0, as: UInt32.self)
 
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.commandBuffer }
+        guard var encoder = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.commandBuffer }
         encoder.setTexture(inputTexture.texture, index: 0)
         encoder.setTexture(history.luma[previous], index: 1)
         encoder.setTexture(history.luma[current], index: 2)
@@ -174,6 +182,15 @@ final class FrameRenderer {
             encoder.dispatch(boxPipeline, width: history.width, height: history.height)
         }
 
+        if options.preserveColors {
+            encoder.endEncoding()
+            toneBlur.encode(commandBuffer: commandBuffer, sourceTexture: history.luma[current], destinationTexture: history.cameraTone)
+            toneBlur.encode(commandBuffer: commandBuffer, sourceTexture: history.smoothed[current],
+                            destinationTexture: history.styledTone)
+            guard let next = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.commandBuffer }
+            encoder = next
+        }
+
         let maskTexture = options.mask == .everything ? nil : mask
         var composite = compositeUniforms(camera: camera)
         composite.detail = options.detail
@@ -192,6 +209,8 @@ final class FrameRenderer {
         encoder.setTexture(maskTexture ?? placeholder, index: 4)
         encoder.setTexture(lumaPlane.texture, index: 5)
         encoder.setTexture(chromaPlane.texture, index: 6)
+        encoder.setTexture(options.preserveColors ? history.cameraTone : placeholder, index: 7)
+        encoder.setTexture(options.preserveColors ? history.styledTone : placeholder, index: 8)
         encoder.setBytes(&composite, length: MemoryLayout<CompositeUniforms>.stride, index: 0)
         encoder.dispatch(compositePipeline, width: outputWidth / 2, height: outputHeight / 2)
         encoder.endEncoding()
@@ -207,11 +226,13 @@ final class FrameRenderer {
         let (output, lumaPlane, chromaPlane) = try makeOutput()
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.commandBuffer }
         var uniforms = compositeUniforms(camera: camera)
+        uniforms.passthrough = 1
         encoder.setTexture(cameraTexture.texture, index: 0)
+        for index in [1, 2, 3, 4, 7, 8] { encoder.setTexture(placeholder, index: index) }
         encoder.setTexture(lumaPlane.texture, index: 5)
         encoder.setTexture(chromaPlane.texture, index: 6)
         encoder.setBytes(&uniforms, length: MemoryLayout<CompositeUniforms>.stride, index: 0)
-        encoder.dispatch(bypassPipeline, width: outputWidth / 2, height: outputHeight / 2)
+        encoder.dispatch(compositePipeline, width: outputWidth / 2, height: outputHeight / 2)
         encoder.endEncoding()
         return (output, [cameraTexture.owner, lumaPlane.owner, chromaPlane.owner])
     }
@@ -240,7 +261,8 @@ final class FrameRenderer {
             : SIMD2<Float>(1, cameraAspect / outputAspect)
         return CompositeUniforms(cameraOrigin: (1 - scale) / 2, cameraScale: scale,
                                  outputSize: SIMD2(Float(outputWidth), Float(outputHeight)), detail: 0,
-                                 feather: Self.maskFeatherPixels, guided: 0, preserveColors: 0, maskMode: 0, hasMask: 0)
+                                 feather: Self.maskFeatherPixels, guided: 0, preserveColors: 0, maskMode: 0, hasMask: 0,
+                                 passthrough: 0)
     }
 
     private static func aspectFill(from camera: CVPixelBuffer, toWidth width: Int, height: Int) -> MPSScaleTransform {

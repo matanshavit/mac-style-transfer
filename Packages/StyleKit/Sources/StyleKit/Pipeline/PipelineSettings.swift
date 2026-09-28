@@ -19,14 +19,16 @@ public struct PipelineSettings: Sendable, Equatable {
     /// 0...1. Temporal smoothing of static areas.
     public var smoothing: Float
     public var upsampling: UpsamplingMode
-    /// 0...2. How much camera detail the guided upsampling adds back.
+    /// 0...1, clamped. How much camera detail the guided upsampling adds back.
     public var detail: Float
     public var preserveColors: Bool
     public var mask: MaskMode
+    /// Balanced by default: at 30 fps its mask is as fresh as the fast one (the current frame at the balanced preset,
+    /// the previous frame at fast) and has twice the resolution.
     public var segmentationQuality: SegmentationQuality
     public var bypass: Bool
 
-    public init(quality: Quality = .balanced, style: StyleVector? = nil, strength: Float = 1, smoothing: Float = 0.6,
+    public init(quality: Quality = .balanced, style: StyleVector? = nil, strength: Float = 0.75, smoothing: Float = 0.8,
                 upsampling: UpsamplingMode = .guided, detail: Float = 1, preserveColors: Bool = false,
                 mask: MaskMode = .everything, segmentationQuality: SegmentationQuality = .balanced, bypass: Bool = false) {
         self.quality = quality

@@ -1,27 +1,19 @@
 import Foundation
 
-/// Counts frames between admission and output.
+/// Counts frames in a stage of the pipeline. `enter` blocks while the stage is full.
 final class InFlightGate: @unchecked Sendable {
     private let condition = NSCondition()
     private var count = 0
-    private var limit = 1
+    private var limit: Int
 
-    var current: Int {
-        condition.withLock { count }
+    init(limit: Int = .max) {
+        self.limit = limit
     }
 
     func setLimit(_ value: Int) {
         condition.withLock {
             limit = value
             condition.broadcast()
-        }
-    }
-
-    func tryEnter() -> Bool {
-        condition.withLock {
-            guard count < limit else { return false }
-            count += 1
-            return true
         }
     }
 

@@ -14,9 +14,9 @@ public struct ProcessedFrame: @unchecked Sendable {
 
 /// Camera frame -> downscale -> style engine -> temporal smoothing -> upsample and composite -> NV12 -> outputs.
 ///
-/// Settings can change from any thread and apply from the next admitted frame. At most one frame is in flight for a
-/// single-device engine and two for dual, so latency never queues up: in `.dropFrames` mode a frame that arrives
-/// while the pipeline is full is dropped, in `.waitForSlot` mode the source's thread blocks (for offline runs).
+/// Settings can change from any thread and apply from the next admitted frame. Each engine instance works on one frame
+/// at a time and one more frame waits for the next free instance. In `.dropFrames` mode a newer frame replaces the
+/// waiting one, so latency never queues up; in `.waitForSlot` mode the source's thread blocks instead (for offline runs).
 public final class StylePipeline: @unchecked Sendable {
     public enum Backpressure: Sendable {
         case dropFrames
@@ -53,9 +53,12 @@ public final class StylePipeline: @unchecked Sendable {
         let settings: PipelineSettings
         let admitted = HostClock.now()
         var style: StyleVector?
+        var usesEngine = false
+        var dualEngine = false
         var resetHistory = false
         var input: CVPixelBuffer?
         var predictorInput: CVPixelBuffer?
+        var needsContentVector = false
         /// Held until the post pass completes so the engine's pool cannot reuse it while the GPU reads it.
         var stylized: CVPixelBuffer?
         var retained: [CVMetalTexture] = []
@@ -67,26 +70,46 @@ public final class StylePipeline: @unchecked Sendable {
         }
     }
 
+    private struct Delivery {
+        let job: Job
+        let output: CVPixelBuffer
+        let stylized: Bool
+        let release: CMTime
+    }
+
+    private struct DeviceAge {
+        var seconds: Double
+        var lastOutput: CMTime
+    }
+
     private let context: MetalContext
     private let renderer: FrameRenderer
     private let segmenter: PersonSegmenter
-    private let gate = InFlightGate()
+    private let admission = InFlightGate(limit: 2)
+    private let inFlight = InFlightGate()
     private let stats = StatsCollector()
     private let shared: Mutex<Shared>
     private let queue = DispatchQueue(label: "StyleKit.StylePipeline", qos: .userInteractive)
     private let outputQueue = DispatchQueue(label: "StyleKit.StylePipeline.output", qos: .userInteractive)
     private let predictorQueue = DispatchQueue(label: "StyleKit.StylePipeline.predictor", qos: .userInitiated)
     private let statsTimer: any DispatchSourceTimer
+    private let releaseTimer: any DispatchSourceTimer
 
     private var engines: [Quality: StyleEngine] = [:]
     private var loadingEngines: Set<Quality> = []
     private var failedEngines: Set<Quality> = []
     private var activeEngine: StyleEngine?
+    private var engineFrames = 0
+    private var waiting: [Job] = []
+    private var segmentation: SegmentationQuality?
     private var predictor = PredictorState.idle
     private var contentVector: StyleVector?
     private var contentPending = false
     private var lastContentTime: CMTime?
     private var lastStyle: StyleVector?
+
+    private var held: [Delivery] = []
+    private var deviceAges: [ComputeDevice: DeviceAge] = [:]
 
     public init(modelStore: ModelStore, settings: PipelineSettings = PipelineSettings(),
                 backpressure: Backpressure = .dropFrames, outputWidth: Int = 1280, outputHeight: Int = 720) throws {
@@ -99,19 +122,22 @@ public final class StylePipeline: @unchecked Sendable {
         segmenter = PersonSegmenter(device: context.device)
         shared = Mutex(Shared(settings: settings))
         statsTimer = DispatchSource.makeTimerSource(queue: outputQueue)
+        releaseTimer = DispatchSource.makeTimerSource(flags: .strict, queue: outputQueue)
         statsTimer.schedule(deadline: .now() + 1, repeating: 1)
         statsTimer.setEventHandler { [weak self] in self?.publishStats() }
         statsTimer.resume()
+        releaseTimer.setEventHandler { [weak self] in self?.deliverHeld() }
+        releaseTimer.resume()
     }
 
     deinit {
         statsTimer.cancel()
+        releaseTimer.cancel()
         shared.withLock { $0.statsContinuations.values.forEach { $0.finish() } }
     }
 
     public var settings: PipelineSettings {
-        get { shared.withLock { $0.settings } }
-        set { shared.withLock { $0.settings = newValue } }
+        shared.withLock { $0.settings }
     }
 
     public func updateSettings(_ change: (inout PipelineSettings) -> Void) {
@@ -170,6 +196,7 @@ public final class StylePipeline: @unchecked Sendable {
 
     public func start(source: any FrameSource) throws {
         stop()
+        queue.async { [self] in resetSourceState() }
         try source.start(handler: frameHandler)
         shared.withLock { $0.source = source }
     }
@@ -184,25 +211,18 @@ public final class StylePipeline: @unchecked Sendable {
 
     public func submit(_ frame: VideoFrame) {
         stats.recordCapture()
-        switch backpressure {
-        case .dropFrames:
-            guard gate.tryEnter() else {
-                stats.recordDrop()
-                return
-            }
-        case .waitForSlot:
-            gate.enter()
-        }
+        if backpressure == .waitForSlot { admission.enter() }
+        inFlight.enter()
         let job = Job(frame: frame, settings: settings)
-        queue.async { [self] in begin(job) }
+        queue.async { [self] in schedule(job) }
     }
 
     /// Returns once every admitted frame has been output or dropped.
     public func waitUntilIdle() async {
-        let gate = gate
+        let inFlight = inFlight
         await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
-                gate.waitUntilEmpty()
+                inFlight.waitUntilEmpty()
                 continuation.resume()
             }
         }
@@ -210,37 +230,55 @@ public final class StylePipeline: @unchecked Sendable {
 
     // MARK: - Pipeline queue
 
-    private func begin(_ job: Job) {
-        let settings = job.settings
-        guard !settings.bypass, let style = settings.style else {
-            // Stylized frames still in flight would land after this one.
-            if activeEngine != nil {
-                guard gate.current == 1 else { return drop() }
-                activate(nil)
-            }
-            return encodeBypass(job)
+    private func schedule(_ job: Job) {
+        if backpressure == .dropFrames {
+            waiting.forEach(drop)
+            waiting.removeAll()
         }
-        if engines[settings.quality] == nil { loadEngine(settings.quality) }
-        if let wanted = engines[settings.quality], wanted !== activeEngine {
-            if activeEngine != nil && gate.current > 1 { return drop() }
-            activate(wanted)
-        }
-        guard let engine = activeEngine else { return encodeBypass(job) }
+        waiting.append(job)
+        startWaiting()
+    }
 
+    private func startWaiting() {
+        while let job = waiting.first, canStart(job) {
+            waiting.removeFirst()
+            start(job)
+        }
+    }
+
+    /// Frames from the previous engine, or stylized frames before a passthrough one, must all be posted first so
+    /// outputs stay in order.
+    private func canStart(_ job: Job) -> Bool {
+        guard let engine = engine(for: job.settings) else { return engineFrames == 0 }
+        if engine !== activeEngine { return engineFrames == 0 }
+        return engineFrames < engine.maxConcurrentFrames
+    }
+
+    /// Nil passes the frame through. The active engine keeps running while the wanted one loads.
+    private func engine(for settings: PipelineSettings) -> StyleEngine? {
+        guard !settings.bypass, settings.style != nil else { return nil }
+        if engines[settings.quality] == nil { loadEngine(settings.quality) }
+        return engines[settings.quality] ?? activeEngine
+    }
+
+    private func start(_ job: Job) {
+        let settings = job.settings
+        let engine = engine(for: settings)
+        if engine !== activeEngine { activate(engine) }
+        let segmentation = engine != nil && settings.mask != .everything ? settings.segmentationQuality : nil
+        if segmentation != self.segmentation {
+            segmenter.reset()
+            self.segmentation = segmentation
+        }
+        guard let engine, let style = settings.style else { return encodeBypass(job) }
+
+        engineFrames += 1
+        job.usesEngine = true
+        job.dualEngine = engine.mode == .dual
         job.resetHistory = style != lastStyle
         lastStyle = style
         job.style = style
-        if settings.strength < 1 {
-            if let contentVector { job.style = style.blended(withContent: contentVector, strength: max(0, settings.strength)) }
-            if case .ready(let predictor) = predictor, !contentPending, contentVectorDue(job.frame.presentationTime) {
-                let camera = job.frame.pixelBuffer
-                job.predictorInput = try? StylePredictor.makeBuffer(predictor.inputSize(forWidth: camera.width, height: camera.height))
-                contentPending = job.predictorInput != nil
-                lastContentTime = job.frame.presentationTime
-            } else if case .idle = predictor {
-                loadPredictor()
-            }
-        }
+        requestContentVector(for: job)
 
         do {
             let input = try engine.makeInputBuffer()
@@ -255,21 +293,49 @@ public final class StylePipeline: @unchecked Sendable {
             }
             commandBuffer.commit()
         } catch {
-            if job.predictorInput != nil { contentPending = false }
-            fail(error)
+            if job.predictorInput != nil && !job.needsContentVector { contentPending = false }
+            fail(job, error)
+        }
+    }
+
+    /// Strength below 1 blends toward the content's own vector. The first frame computes it before stylizing so it
+    /// does not flash at full strength; later frames refresh it in the background.
+    private func requestContentVector(for job: Job) {
+        guard job.settings.strength < 1 else {
+            contentVector = nil
+            return
+        }
+        switch predictor {
+        case .idle:
+            loadPredictor()
+        case .ready(let predictor):
+            let time = job.frame.presentationTime
+            job.needsContentVector = contentVector == nil
+            guard job.needsContentVector || (!contentPending && contentVectorDue(time)) else { return }
+            let camera = job.frame.pixelBuffer
+            job.predictorInput = try? StylePredictor.makeBuffer(predictor.inputSize(forWidth: camera.width, height: camera.height))
+            if job.predictorInput != nil && !job.needsContentVector { contentPending = true }
+            lastContentTime = time
+        case .loading, .failed:
+            break
         }
     }
 
     private func downscaled(_ job: Job, engine: StyleEngine, gpuMilliseconds: Double, error: (any Error)?) {
         job.retained = []
-        if let predictorInput = job.predictorInput {
-            if error == nil, case .ready(let predictor) = predictor {
+        if let predictorInput = job.predictorInput, case .ready(let predictor) = predictor {
+            if job.needsContentVector {
+                if error == nil, let vector = try? predictor.vector(for: predictorInput) { contentVector = vector }
+            } else if error == nil {
                 updateContentVector(predictor, from: predictorInput)
             } else {
                 contentPending = false
             }
         }
-        guard error == nil, let input = job.input, let style = job.style else { return fail(error) }
+        guard error == nil, let input = job.input, var style = job.style else { return fail(job, error) }
+        if job.settings.strength < 1, let contentVector {
+            style = style.blended(withContent: contentVector, strength: max(0, job.settings.strength))
+        }
         job.timings.downscaleMilliseconds = gpuMilliseconds
         if job.settings.mask != .everything {
             segmenter.submit(input, quality: job.settings.segmentationQuality)
@@ -282,16 +348,16 @@ public final class StylePipeline: @unchecked Sendable {
     private func stylized(_ job: Job, result: Result<StylizedFrame, any Error>) {
         switch result {
         case .failure(let error):
-            fail(error)
+            fail(job, error)
         case .success(let frame):
-            guard let input = job.input else { return fail(nil) }
+            guard let input = job.input else { return fail(job, nil) }
             job.stylized = frame.pixelBuffer
             job.timings.inferenceMilliseconds = frame.inferenceMilliseconds
             job.timings.device = frame.device
             let settings = job.settings
-            let options = PostOptions(smoothing: settings.smoothing, upsampling: settings.upsampling, detail: settings.detail,
-                                      preserveColors: settings.preserveColors, mask: settings.mask,
-                                      resetHistory: job.resetHistory)
+            let options = PostOptions(smoothing: settings.smoothing, upsampling: settings.upsampling,
+                                      detail: min(max(settings.detail, 0), 1), preserveColors: settings.preserveColors,
+                                      mask: settings.mask, resetHistory: job.resetHistory)
             do {
                 let commandBuffer = try context.makeCommandBuffer()
                 let (output, owners) = try renderer.encodeStylized(
@@ -300,7 +366,7 @@ public final class StylePipeline: @unchecked Sendable {
                 job.retained = owners
                 commit(job, output: output, stylized: true, commandBuffer: commandBuffer)
             } catch {
-                fail(error)
+                fail(job, error)
             }
         }
     }
@@ -312,7 +378,7 @@ public final class StylePipeline: @unchecked Sendable {
             job.retained = owners
             commit(job, output: output, stylized: false, commandBuffer: commandBuffer)
         } catch {
-            fail(error)
+            fail(job, error)
         }
     }
 
@@ -322,18 +388,33 @@ public final class StylePipeline: @unchecked Sendable {
             let milliseconds = Self.gpuMilliseconds(buffer)
             let error = buffer.error
             outputQueue.async { [self] in
-                deliver(job, output: box.value, stylized: stylized, postMilliseconds: milliseconds, error: error)
+                posted(job, output: box.value, stylized: stylized, postMilliseconds: milliseconds, error: error)
             }
         }
         commandBuffer.commit()
+        leftEngine(job)
+    }
+
+    /// The frame's post pass is committed or the frame failed before that.
+    private func leftEngine(_ job: Job) {
+        if job.usesEngine { engineFrames -= 1 }
+        if backpressure == .waitForSlot { admission.leave() }
+        startWaiting()
     }
 
     private func activate(_ engine: StyleEngine?) {
         activeEngine = engine
-        gate.setLimit(engine?.maxConcurrentFrames ?? 1)
+        admission.setLimit((engine?.maxConcurrentFrames ?? 1) + 1)
         renderer.resetHistory()
         let description = engine.map { "\($0.size) \($0.mode.rawValue)" }
         shared.withLock { $0.engine = description }
+    }
+
+    private func resetSourceState() {
+        contentVector = nil
+        lastContentTime = nil
+        segmenter.reset()
+        renderer.resetHistory()
     }
 
     private func loadEngine(_ quality: Quality) {
@@ -381,20 +462,21 @@ public final class StylePipeline: @unchecked Sendable {
         predictorQueue.async { [self] in
             let vector = try? predictor.vector(for: box.value)
             queue.async { [self] in
-                if let vector { contentVector = vector }
+                if let vector, contentVector != nil { contentVector = vector }
                 contentPending = false
             }
         }
     }
 
-    private func drop() {
-        stats.recordDrop()
-        gate.leave()
+    private func fail(_ job: Job, _ error: (any Error)?) {
+        if let error { record(error) }
+        leftEngine(job)
+        drop(job)
     }
 
-    private func fail(_ error: (any Error)?) {
-        if let error { record(error) }
-        drop()
+    private func drop(_ job: Job) {
+        stats.recordDrop()
+        inFlight.leave()
     }
 
     private func record(_ error: any Error) {
@@ -403,19 +485,53 @@ public final class StylePipeline: @unchecked Sendable {
 
     // MARK: - Output queue
 
-    private func deliver(_ job: Job, output: CVPixelBuffer, stylized: Bool, postMilliseconds: Double, error: (any Error)?) {
+    private func posted(_ job: Job, output: CVPixelBuffer, stylized: Bool, postMilliseconds: Double, error: (any Error)?) {
         job.retained = []
-        guard error == nil else { return fail(error) }
+        if let error {
+            record(error)
+            return drop(job)
+        }
         job.timings.postMilliseconds = postMilliseconds
+        held.append(Delivery(job: job, output: output, stylized: stylized, release: releaseTime(for: job)))
+        deliverHeld()
+    }
+
+    /// In dual mode the GPU and the Neural Engine take different times, so alternating frames would come out unevenly
+    /// spaced. While both are in use, each frame is held until it is as old as a typical frame from the slower one.
+    private func releaseTime(for job: Job) -> CMTime {
+        let now = HostClock.now()
+        guard job.dualEngine, let device = job.timings.device else { return now }
+        let age = (now - job.admitted).seconds
+        let smoothed = deviceAges[device].map { $0.seconds + 0.1 * (age - $0.seconds) } ?? age
+        deviceAges[device] = DeviceAge(seconds: smoothed, lastOutput: now)
+        let recent = deviceAges.values.filter { (now - $0.lastOutput).seconds < 0.5 }
+        guard recent.count > 1, let target = recent.map(\.seconds).max(), age < target else { return now }
+        return job.admitted + CMTime(seconds: target, preferredTimescale: 1_000_000_000)
+    }
+
+    private func deliverHeld() {
+        while let next = held.first {
+            let wait = (next.release - HostClock.now()).seconds
+            if wait > 0 {
+                releaseTimer.schedule(deadline: .now() + wait, leeway: .nanoseconds(0))
+                return
+            }
+            held.removeFirst()
+            deliver(next)
+        }
+    }
+
+    private func deliver(_ delivery: Delivery) {
+        let job = delivery.job
         job.timings.totalMilliseconds = HostClock.milliseconds(since: job.admitted)
         job.timings.latencyMilliseconds = HostClock.milliseconds(since: job.frame.hostTime)
         let (outputs, onFrame) = shared.withLock { ($0.outputs, $0.onFrame) }
         for destination in outputs {
-            destination.publish(output, time: job.frame.presentationTime)
+            destination.publish(delivery.output, time: job.frame.presentationTime)
         }
-        onFrame?(ProcessedFrame(output: output, source: job.frame, stylized: stylized, timings: job.timings))
+        onFrame?(ProcessedFrame(output: delivery.output, source: job.frame, stylized: delivery.stylized, timings: job.timings))
         stats.recordOutput(job.timings)
-        gate.leave()
+        inFlight.leave()
     }
 
     private func publishStats() {

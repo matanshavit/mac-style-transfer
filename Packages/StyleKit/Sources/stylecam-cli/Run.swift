@@ -66,10 +66,12 @@ func runPipeline(_ arguments: Arguments) async throws {
     let seconds = now() - start
     try await writer.finish()
     let report = await analyzer.finish()
-    let dropped = expected - report.frames - source.skippedFrames
+    let dropped = source.emittedFrames - report.frames
 
     print("frames  \(report.frames) out (\(report.stylized) stylized), \(dropped) dropped, \(source.skippedFrames) skipped by source pacing")
-    print("fps     \(format(Double(report.frames) / seconds, 1)) sustained over \(format(seconds, 2)) s")
+    print("fps     \(format(Double(report.frames) / seconds, 1)) sustained over \(format(seconds, 2)) s, output interval "
+        + "p50 \(format(percentile(report.outputIntervals, 0.5))) p95 \(format(percentile(report.outputIntervals, 0.95))) "
+        + "max \(format(report.outputIntervals.max() ?? 0)) ms")
     let rows: [(String, KeyPath<FrameTimings, Double>)] = [
         ("downscale (gpu)", \.downscaleMilliseconds), ("inference", \.inferenceMilliseconds),
         ("post (gpu)", \.postMilliseconds), ("total", \.totalMilliseconds), ("latency", \.latencyMilliseconds),
@@ -86,7 +88,9 @@ func runPipeline(_ arguments: Arguments) async throws {
         return "\(device.rawValue) \(timings.count) frames, inference p50 \(format(percentile(inference, 0.5))) "
             + "p95 \(format(percentile(inference, 0.95))) ms"
     }.joined(separator: "; "))
-    print("flicker \(format(report.flicker, 3)) (output \(format(report.outputChange, 3)) / input \(format(report.inputChange, 3)) mean abs luma change)")
+    print("static  flicker \(format(report.staticFlicker, 3)) levels over \(format(report.staticFraction * 100, 1))% of pixels")
+    print("moving  output change \(format(report.movingOutputChange, 2)) / input \(format(report.movingInputChange, 2)) levels "
+        + "over \(format(report.movingFraction * 100, 1))% of pixels")
     print("wrote   \(outputURL.path) (\(writer.framesWritten) frames)")
     for still in report.stills.sorted(by: { $0.path < $1.path }) { print("still   \(still.path)") }
 }
