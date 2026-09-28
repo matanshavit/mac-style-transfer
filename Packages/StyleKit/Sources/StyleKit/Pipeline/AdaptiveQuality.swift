@@ -135,6 +135,8 @@ final class AdaptiveController {
     private var trial: Trial?
     private var backoffs: [EngineMode: Backoff] = [:]
     private var steppedUp: Double?
+    /// The step the last passed trial of the preferred step ran next to.
+    private var landing: Quality?
     private var lastArrival: CMTime?
     private var intervals: [Double] = []
 
@@ -152,8 +154,8 @@ final class AdaptiveController {
     }
 
     var fallback: Quality? {
-        guard preferred != nil, step + 1 < steps.count else { return nil }
-        return steps[step + 1]
+        guard preferred != nil, fallbackStep < steps.count else { return nil }
+        return steps[fallbackStep]
     }
 
     /// The engine configuration to run for an adaptive `quality`, using the model `sizes`. `current` is the engine that
@@ -212,11 +214,12 @@ final class AdaptiveController {
         let milliseconds = median(samples.map(\.total))
         let budget = budget(for: quality, interval: interval)
         guard milliseconds > budget else { return startTrialIfDue(now, interval: interval) }
-        guard step + 1 < steps.count else { return }
+        let next = fallbackStep
+        guard next < steps.count else { return }
         if steppedUp.map({ now - $0 >= Self.quickFallback }) ?? true { backoffs[quality.mode] = nil }
         backoffs[quality.mode, default: Backoff()].backOff(now)
         steppedUp = nil
-        move(to: step + 1, reason: .slowFrames(quality, milliseconds: milliseconds, budget: budget))
+        move(to: next, reason: .slowFrames(quality, milliseconds: milliseconds, budget: budget))
     }
 
     /// A trial frame on `quality`'s engine finished.
@@ -232,6 +235,7 @@ final class AdaptiveController {
         let limit = Self.trialFraction * budget(for: quality, interval: interval)
         if milliseconds <= limit {
             steppedUp = now
+            if trial.step == 0 { landing = steps[step] }
             backoffs[quality.mode, default: Backoff()].wait(now)
             move(to: trial.step, reason: trial.step == 0 ? .preferred : .trialFit(milliseconds: milliseconds, limit: limit))
         } else {
@@ -252,8 +256,8 @@ final class AdaptiveController {
             if trial?.step == index {
                 trial = nil
                 setReason(.engineFailed(quality))
-            } else {
-                trial?.step -= 1
+            } else if let trial, index < trial.step {
+                self.trial?.step -= 1
             }
         }
         return true
@@ -291,6 +295,7 @@ final class AdaptiveController {
         trial = nil
         backoffs = [:]
         steppedUp = nil
+        landing = nil
         emitDecision()
     }
 
@@ -298,6 +303,13 @@ final class AdaptiveController {
     private var floor: Int {
         guard conditions.reason != nil else { return 0 }
         return steps.firstIndex { $0.mode == .ane } ?? 0
+    }
+
+    /// One step down, except from the preferred step, which goes back to where its trial passed from, since the steps
+    /// that trial skipped may not fit.
+    private var fallbackStep: Int {
+        guard step == 0, let landing, let index = steps.firstIndex(of: landing), index > 0 else { return step + 1 }
+        return index
     }
 
     private var frameInterval: Double? {
@@ -315,8 +327,8 @@ final class AdaptiveController {
     }
 
     /// From the Neural Engine the trial is the preferred step on the GPU, whatever the steps between, since it does not
-    /// hold up output frames. When the GPU is not allowed, or while a failed GPU trial backs off, it is the next step up
-    /// on the Neural Engine, once the Neural Engine has time for both in a frame interval, or it would delay the output.
+    /// hold up output frames. When the GPU is not allowed or its trials back off, it is the next step up on the Neural
+    /// Engine, once the Neural Engine has time for both in a frame interval, or it would delay the output.
     /// That time is estimated from the current step's by pixel count.
     private func trialStep(_ now: Double, interval: Double) -> Int? {
         guard step > floor else { return nil }
