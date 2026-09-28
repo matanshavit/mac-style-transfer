@@ -11,7 +11,8 @@ generate:
 
 build: generate
 	xcodebuild -project StyleCam.xcodeproj -scheme StyleCam -configuration Debug \
-		-derivedDataPath $(DERIVED) CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
+		-derivedDataPath $(DERIVED) CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+		STYLECAM_APP_ENTITLEMENTS=App/StyleCam-NoTeam.entitlements build
 
 build-signed: generate
 	xcodebuild -project StyleCam.xcodeproj -scheme StyleCam -configuration Release \

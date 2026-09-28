@@ -97,7 +97,8 @@ final class AppModel {
         #else
         source = .camera
         defaults = .standard
-        preferences = Preferences(defaults: .standard)
+        let preferences = Preferences(defaults: .standard)
+        self.preferences = preferences
         #endif
         cameraAuthorization = source == .camera ? Self.currentCameraAuthorization : .authorized
         virtualCamera = (preferences.virtualCameraTarget == .obs ? obsOutput : styleCamOutput).state
