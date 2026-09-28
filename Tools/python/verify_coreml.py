@@ -1,7 +1,8 @@
 """Compare Models/*.mlpackage against the PyTorch port (fp32).
 
 The predictor is checked on every painting in Styles/, the transformers on one content image.
-Usage: uv run verify_coreml.py [--content PATH] [--style PATH]
+--checkpoint also checks the StableTransformer models against the checkpoint they came from.
+Usage: uv run verify_coreml.py [--content PATH] [--style PATH] [--checkpoint CKPT]
 """
 import argparse
 import glob
@@ -14,6 +15,7 @@ import torch
 from PIL import Image
 
 from convert_coreml import MODELS, PADDING_KEY, predictor_input_size
+from magenta_torch import load_checkpoint
 from tfjs_weights import load_predictor, load_transformer
 
 STYLES = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Styles"))
@@ -40,6 +42,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--content", default=os.path.join(STYLES, "hay_wain.jpg"))
     ap.add_argument("--style", default=os.path.join(STYLES, "starry_night.jpg"))
+    ap.add_argument("--checkpoint", help="train_stable.py checkpoint behind Models/StableTransformer_*")
     args = ap.parse_args()
     torch.set_grad_enabled(False)
 
@@ -50,16 +53,21 @@ def main():
     torch_bottlenecks = {k: pred(to_tensor(img)).numpy().reshape(-1) for k, img in style_images.items()}
     style = pred(to_tensor(predictor_image(args.style)))
 
+    families = {"MagentaTransformer": load_transformer}
+    if args.checkpoint:
+        families["StableTransformer"] = lambda padding: load_checkpoint(args.checkpoint)
     transformers = []
-    for path in sorted(glob.glob(os.path.join(MODELS, "MagentaTransformer_*.mlpackage"))):
-        meta = ct.models.MLModel(path, skip_model_load=True)
-        spec = meta.get_spec().description.input[0].type.imageType
-        w, h = spec.width, spec.height
-        padding = meta.user_defined_metadata[PADDING_KEY]
-        content = Image.open(args.content).convert("RGB").resize((w, h), Image.BILINEAR)
-        ref = load_transformer(padding)(to_tensor(content), style)[0].permute(1, 2, 0).numpy()[:h, :w]
-        transformers.append((path, f"{w}x{h}", padding, content, ref))
-    transformers.sort(key=lambda t: t[3].size[0])
+    for name, load in families.items():
+        found = []
+        for path in glob.glob(os.path.join(MODELS, f"{name}_*.mlpackage")):
+            meta = ct.models.MLModel(path, skip_model_load=True)
+            spec = meta.get_spec().description.input[0].type.imageType
+            w, h = spec.width, spec.height
+            padding = meta.user_defined_metadata[PADDING_KEY]
+            content = Image.open(args.content).convert("RGB").resize((w, h), Image.BILINEAR)
+            ref = load(padding)(to_tensor(content), style)[0].permute(1, 2, 0).numpy()[:h, :w]
+            found.append((path, f"{name} {w}x{h}", padding, content, ref))
+        transformers += sorted(found, key=lambda t: t[3].size[0])
 
     print("predictor vs PyTorch, %d styles" % len(style_images))
     for unit, cu in UNITS.items():
