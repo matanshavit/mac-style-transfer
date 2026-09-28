@@ -16,7 +16,7 @@ build: generate
 
 build-signed: generate
 	xcodebuild -project StyleCam.xcodeproj -scheme StyleCam -configuration Release \
-		-derivedDataPath $(DERIVED) -allowProvisioningUpdates build
+		-derivedDataPath $(DERIVED) -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
 
 # macOS only activates the camera extension from an app in /Applications.
 install: build-signed
