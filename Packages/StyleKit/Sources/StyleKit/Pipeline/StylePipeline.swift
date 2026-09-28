@@ -351,7 +351,7 @@ public final class StylePipeline: @unchecked Sendable {
         let sizes = ModelSize.standard.filter { size in
             [network, .classic].contains { modelSizes[$0]?.contains(size) == true }
         }
-        return adaptive.target(for: quality, sizes: sizes, current: currentKey?.quality, now: HostClock.now().seconds)
+        return adaptive.target(for: quality, sizes: sizes, current: currentKey?.quality)
     }
 
     /// The chosen network, or classic where the chosen one has no model or its engine failed.
@@ -653,7 +653,7 @@ public final class StylePipeline: @unchecked Sendable {
     }
 
     private func conditionsChanged() {
-        adaptive.update(.current(), now: HostClock.now().seconds)
+        adaptive.update(.current())
         manageEngines()
     }
 

@@ -9,7 +9,7 @@ public struct AdaptiveDecision: Sendable, Equatable, CustomStringConvertible {
     public var description: String { "\(quality): \(reason)" }
 }
 
-/// Times are p50 milliseconds from admission to output. The budget is 65% of the camera's frame interval per engine
+/// Times are p50 milliseconds from admission to output. The budget is 75% of the camera's frame interval per engine
 /// instance, and a trial must fit in 90% of it.
 public enum AdaptiveReason: Sendable, Equatable, CustomStringConvertible {
     case preferred
@@ -77,11 +77,12 @@ public enum AdaptiveEvent: Sendable, CustomStringConvertible {
 ///
 /// Steps down after a window of frames whose p50 misses the budget. Steps up only after a trial: the higher step runs
 /// on copies of the frames while the current step keeps producing output, so a busy GPU never shows as a stutter.
-/// A trial starts only from a step that fits its budget, and failed trials back off from 20 s to 160 s. No step-down
-/// happens while a trial runs, which takes about a second, and the window starts over after it because the trial
-/// slows the running step. The window also starts over after a gap in frames, such as Original or a camera restart.
+/// A trial starts only from a step that fits its budget, and failed trials back off from 20 s to 160 s, the GPU apart
+/// from the Neural Engine. No step-down happens while a trial runs, which takes about a second, and the window starts
+/// over after it because the trial slows the running step. The window also starts over after a gap in frames, such as
+/// Original or a camera restart.
 final class AdaptiveController {
-    static let budgetFraction = 0.65
+    static let budgetFraction = 0.75
     static let trialFraction = 0.9
     static let window = 1.5
     static let settleFrames = 3
@@ -108,6 +109,20 @@ final class AdaptiveController {
         var inference: [Double] = []
     }
 
+    private struct Backoff {
+        var next = 0.0
+        var delay = AdaptiveController.firstTrialDelay
+
+        mutating func wait(_ now: Double) {
+            next = now + delay
+        }
+
+        mutating func backOff(_ now: Double) {
+            wait(now)
+            delay = min(delay * 2, AdaptiveController.maxTrialDelay)
+        }
+    }
+
     private var sizes: [ModelSize] = []
     private var conditions: SystemConditions
     private var preferred: Quality?
@@ -118,8 +133,7 @@ final class AdaptiveController {
     private var settled = 0
     private var stepStart: Double?
     private var trial: Trial?
-    private var nextTrial = 0.0
-    private var trialDelay = firstTrialDelay
+    private var backoffs: [EngineMode: Backoff] = [:]
     private var steppedUp: Double?
     private var lastArrival: CMTime?
     private var intervals: [Double] = []
@@ -144,8 +158,8 @@ final class AdaptiveController {
 
     /// The engine configuration to run for an adaptive `quality`, using the model `sizes`. `current` is the engine that
     /// ran last.
-    func target(for quality: Quality, sizes: [ModelSize], current: Quality?, now: Double) -> Quality {
-        if quality != preferred || sizes != self.sizes { start(quality, sizes: sizes, current: current, now: now) }
+    func target(for quality: Quality, sizes: [ModelSize], current: Quality?) -> Quality {
+        if quality != preferred || sizes != self.sizes { start(quality, sizes: sizes, current: current) }
         return steps[step]
     }
 
@@ -186,7 +200,7 @@ final class AdaptiveController {
         if let last = samples.last, now - last.time > Self.window { resetStep() }
         if let trial, now - trial.started > Self.trialTimeout {
             endTrial()
-            backOff(now)
+            backoffs[steps[trial.step].mode, default: Backoff()].backOff(now)
         }
         settled += 1
         guard settled > Self.settleFrames else { return }
@@ -199,8 +213,8 @@ final class AdaptiveController {
         let budget = budget(for: quality, interval: interval)
         guard milliseconds > budget else { return startTrialIfDue(now, interval: interval) }
         guard step + 1 < steps.count else { return }
-        if steppedUp.map({ now - $0 >= Self.quickFallback }) ?? true { trialDelay = Self.firstTrialDelay }
-        backOff(now)
+        if steppedUp.map({ now - $0 >= Self.quickFallback }) ?? true { backoffs[quality.mode] = nil }
+        backoffs[quality.mode, default: Backoff()].backOff(now)
         steppedUp = nil
         move(to: step + 1, reason: .slowFrames(quality, milliseconds: milliseconds, budget: budget))
     }
@@ -218,11 +232,11 @@ final class AdaptiveController {
         let limit = Self.trialFraction * budget(for: quality, interval: interval)
         if milliseconds <= limit {
             steppedUp = now
-            nextTrial = now + trialDelay
+            backoffs[quality.mode, default: Backoff()].wait(now)
             move(to: trial.step, reason: trial.step == 0 ? .preferred : .trialFit(milliseconds: milliseconds, limit: limit))
         } else {
             endTrial()
-            backOff(now)
+            backoffs[quality.mode, default: Backoff()].backOff(now)
             setReason(.trialTooSlow(quality, milliseconds: milliseconds, limit: limit))
         }
     }
@@ -245,7 +259,7 @@ final class AdaptiveController {
         return true
     }
 
-    func update(_ conditions: SystemConditions, now: Double) {
+    func update(_ conditions: SystemConditions) {
         guard conditions != self.conditions else { return }
         let previousFloor = floor
         self.conditions = conditions
@@ -254,8 +268,7 @@ final class AdaptiveController {
         if step < floor, let reason = conditions.reason {
             move(to: floor, reason: reason)
         } else if floor < previousFloor {
-            trialDelay = Self.firstTrialDelay
-            nextTrial = now
+            backoffs[steps[0].mode] = nil
             setReason(.pendingTrial)
         } else if step == floor, let reason = conditions.reason {
             setReason(reason)
@@ -264,7 +277,7 @@ final class AdaptiveController {
 
     /// Keeps the running engine when it is one of the steps. Otherwise starts on the Neural Engine and tries the
     /// preferred configuration once that step fits its budget, so a busy GPU does not drop frames at startup.
-    private func start(_ quality: Quality, sizes: [ModelSize], current: Quality?, now: Double) {
+    private func start(_ quality: Quality, sizes: [ModelSize], current: Quality?) {
         preferred = quality
         self.sizes = sizes
         steps = Self.steps(for: quality, available: sizes)
@@ -276,8 +289,7 @@ final class AdaptiveController {
         reason = step == 0 ? .preferred : conditions.reason ?? .pendingTrial
         resetStep()
         trial = nil
-        trialDelay = Self.firstTrialDelay
-        nextTrial = now
+        backoffs = [:]
         steppedUp = nil
         emitDecision()
     }
@@ -296,28 +308,35 @@ final class AdaptiveController {
         Self.budgetFraction * interval * 1000 * (quality.mode == .dual ? 2 : 1)
     }
 
-    /// A trial on the device that runs the current step waits until that device has time for both in a frame
-    /// interval, or it would delay the output. Its time is estimated from the current step's by pixel count.
     private func startTrialIfDue(_ now: Double, interval: Double) {
-        guard step > floor, now >= nextTrial else { return }
-        let current = steps[step], next = steps[step - 1]
-        if next.mode == current.mode {
-            let inference = median(samples.map(\.inference))
-            let expected = inference * Double(next.size.pixels) / Double(current.size.pixels)
-            guard inference + expected <= interval * 1000 else { return }
+        guard let next = trialStep(now, interval: interval) else { return }
+        trial = Trial(step: next, started: now)
+        onEvent?(.trialStarted(steps[next]))
+    }
+
+    /// From the Neural Engine the trial is the preferred step on the GPU, whatever the steps between, since it does not
+    /// hold up output frames. When the GPU is not allowed, or while a failed GPU trial backs off, it is the next step up
+    /// on the Neural Engine, once the Neural Engine has time for both in a frame interval, or it would delay the output.
+    /// That time is estimated from the current step's by pixel count.
+    private func trialStep(_ now: Double, interval: Double) -> Int? {
+        guard step > floor else { return nil }
+        if steps[0].mode != .ane, floor == 0 {
+            if isDue(0, now) { return 0 }
+            if step == 1 { return nil }
         }
-        trial = Trial(step: step - 1, started: now)
-        onEvent?(.trialStarted(next))
+        guard isDue(step - 1, now) else { return nil }
+        let inference = median(samples.map(\.inference))
+        let expected = inference * Double(steps[step - 1].size.pixels) / Double(steps[step].size.pixels)
+        return inference + expected <= interval * 1000 ? step - 1 : nil
+    }
+
+    private func isDue(_ index: Int, _ now: Double) -> Bool {
+        now >= backoffs[steps[index].mode, default: Backoff()].next
     }
 
     private func endTrial() {
         trial = nil
         resetStep()
-    }
-
-    private func backOff(_ now: Double) {
-        nextTrial = now + trialDelay
-        trialDelay = min(trialDelay * 2, Self.maxTrialDelay)
     }
 
     private func move(to index: Int, reason: AdaptiveReason) {
