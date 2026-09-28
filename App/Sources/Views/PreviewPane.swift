@@ -110,6 +110,9 @@ private struct StatsOverlay: View {
             }
             row("Latency", String(format: "%.0f ms", stats.latencyMillisecondsP50))
             row("Engine", stats.engine ?? "passthrough")
+            if let adaptive = stats.adaptive {
+                row("Auto", adaptive.reason.description)
+            }
         }
         .font(.caption.monospacedDigit())
         .padding(.horizontal, 10)

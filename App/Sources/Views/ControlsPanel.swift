@@ -61,6 +61,9 @@ struct ControlsPanel: View {
     }
 
     private static func describe(_ quality: Quality) -> String {
+        if quality.adaptive {
+            return "Moves between the GPU and the Neural Engine to keep the video smooth when the Mac is busy, hot or on battery."
+        }
         let device = switch quality.mode {
         case .gpu: "the GPU"
         case .ane: "the Neural Engine"

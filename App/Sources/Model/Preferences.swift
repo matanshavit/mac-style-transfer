@@ -7,7 +7,7 @@ struct Preferences: Equatable {
     var styleID = "starry_night"
     /// The last painting picked, so toggling the style off and on restores it.
     var lastStyleID: String?
-    var quality = QualityPreset.balanced
+    var quality = QualityPreset.auto
     var strength = Double(PipelineSettings().strength)
     var smoothing = Double(PipelineSettings().smoothing)
     var detail = Double(PipelineSettings().detail)
