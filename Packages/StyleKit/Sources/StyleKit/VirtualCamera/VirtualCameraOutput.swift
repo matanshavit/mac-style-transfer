@@ -91,8 +91,8 @@ public final class VirtualCameraOutput: @unchecked Sendable {
         }
     }
 
-    /// Connects now and keeps reconnecting as the device list changes, and every few seconds after
-    /// a failed start, until `disconnect()`. Calling it again checks again now.
+    /// Connects now and keeps reconnecting as the device list changes, and every few seconds while
+    /// the device is missing or a start failed, until `disconnect()`. Calling it again checks again now.
     @discardableResult
     public func connect() -> Status {
         dispatchPrecondition(condition: .notOnQueue(queue))
@@ -192,6 +192,7 @@ public final class VirtualCameraOutput: @unchecked Sendable {
         guard wantsConnection else { return }
         guard let device = deviceUID.flatMap(CMIODeviceDirectory.device(uid:)) ?? fallbackDeviceName.flatMap(CMIODeviceDirectory.device(named:)) else {
             release { $0 = State(status: .notFound) }
+            scheduleRetry()
             return
         }
         if otherFeederIsActive?() == true {
@@ -232,6 +233,12 @@ public final class VirtualCameraOutput: @unchecked Sendable {
 
     private func fail(_ message: String) {
         update { $0 = State(status: .error(message)) }
+        scheduleRetry()
+    }
+
+    /// The devices listener does not always fire when a camera extension's device appears, so a
+    /// missing device is looked up again too.
+    private func scheduleRetry() {
         guard retryTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(500))
