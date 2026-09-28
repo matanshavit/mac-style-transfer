@@ -1,6 +1,10 @@
 """Convert the PyTorch port to Core ML and write Models/*.mlpackage.
 
 Usage: uv run convert_coreml.py [--sizes 480x270 640x360 ...] [--padding replicate|zeros|reflect]
+       uv run convert_coreml.py --checkpoint ckpt.pt [--sizes ...] [--name StableTransformer] [--out DIR]
+
+--checkpoint converts a train_stable.py transformer (either architecture) with the same inputs and
+outputs, and skips the predictor, which fine-tuning does not change.
 """
 import argparse
 import os
@@ -12,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from magenta_torch import BOTTLENECK_DIM
+from magenta_torch import BOTTLENECK_DIM, load_checkpoint
 from tfjs_weights import load_predictor, load_transformer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +27,7 @@ PREDICTOR_WIDTHS = list(range(128, 513, 32))
 PREDICTOR_RULE = ("resize to height 256 keeping the aspect ratio, then round the width to the "
                   "nearest multiple of 32 and clamp it to 128..512")
 PADDING_KEY = "stylecam.padding"
+ANTIALIAS_KEY = "stylecam.antialias"
 
 
 def predictor_input_size(width, height):
@@ -95,8 +100,7 @@ def build_predictor(out):
     save(ml, "MagentaPredictor", f"Magenta style predictor. Input: {PREDICTOR_RULE}.", out)
 
 
-def build_transformer(width, height, padding, out):
-    t = load_transformer(padding)
+def build_transformer(t, width, height, out, name, source):
     fold_input_scale(t.contract[0].conv)
     ml = convert(TransformerExport(t, width, height),
                  (torch.rand(1, 3, height, width) * 255, torch.zeros(1, BOTTLENECK_DIM, 1, 1)),
@@ -106,9 +110,11 @@ def build_transformer(width, height, padding, out):
     ml.input_description["content"] = f"Frame, RGB 0-255, {width}x{height}"
     ml.input_description["style"] = "Style vector [1,100,1,1] from MagentaPredictor"
     ml.output_description["stylized"] = f"Stylized frame, {width}x{height}"
-    ml.user_defined_metadata[PADDING_KEY] = padding
-    save(ml, f"MagentaTransformer_{width}x{height}",
-         f"Magenta arbitrary style transfer, {width}x{height}, {padding} padding.", out)
+    ml.user_defined_metadata[PADDING_KEY] = t.padding_mode
+    ml.user_defined_metadata[ANTIALIAS_KEY] = str(int(t.antialias))
+    aa = ", anti-aliased" if t.antialias else ""
+    save(ml, f"{name}_{width}x{height}",
+         f"{source} arbitrary style transfer, {width}x{height}, {t.padding_mode} padding{aa}.", out)
 
 
 def parse_size(s):
@@ -121,15 +127,22 @@ def main():
     ap.add_argument("--sizes", nargs="+", default=DEFAULT_SIZES, help="transformer sizes, WxH")
     ap.add_argument("--padding", default="replicate", choices=["replicate", "zeros", "reflect"],
                     help="zeros matches @magenta/image exactly but leaves a dark border")
+    ap.add_argument("--checkpoint", help="train_stable.py checkpoint; its padding overrides --padding")
+    ap.add_argument("--name", default="MagentaTransformer", help="output name prefix")
     ap.add_argument("--out", default=MODELS)
     args = ap.parse_args()
     # TFSamePad's pads are meant to be baked into the trace.
     warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
     torch.set_grad_enabled(False)
     os.makedirs(args.out, exist_ok=True)
-    build_predictor(args.out)
+    if not args.checkpoint:
+        build_predictor(args.out)
     for size in args.sizes:
-        build_transformer(*parse_size(size), args.padding, args.out)
+        if args.checkpoint:
+            t, source = load_checkpoint(args.checkpoint), "Fine-tuned Magenta"
+        else:
+            t, source = load_transformer(args.padding), "Magenta"
+        build_transformer(t, *parse_size(size), args.out, args.name, source)
 
 
 if __name__ == "__main__":

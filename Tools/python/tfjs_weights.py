@@ -92,9 +92,9 @@ def _load_cin(norm, src, prefix):
     norm.gamma.bias.data.copy_(src.raw(f"{sp}/Conv_1/biases"))
 
 
-def load_transformer(padding_mode="replicate", cache=CACHE):
+def load_transformer(padding_mode="replicate", cache=CACHE, antialias=False):
     src = _Weights(os.path.join(cache, "transformer"))
-    m = StyleTransformer(padding_mode=padding_mode).eval()
+    m = StyleTransformer(padding_mode=padding_mode, antialias=antialias).eval()
 
     w = src.w
     assert w["transformer/contract/Pad/paddings"].tolist() == [[0, 0], [4, 4], [4, 4], [0, 0]]

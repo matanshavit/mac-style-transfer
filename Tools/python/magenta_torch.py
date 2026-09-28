@@ -3,6 +3,11 @@ shipped in the @magenta/image 0.2.1 TF.js checkpoints. NCHW, RGB images in [0, 1
 
 StylePredictor:   style image [N,3,H,W]           -> bottleneck [N,100,1,1]
 StyleTransformer: content [N,3,H,W], bottleneck    -> stylized [N,3,4*ceil(H/4),4*ceil(W/4)]
+
+StyleTransformer(antialias=True) is the shift-stable variant for fine-tuning (train_stable.py): a
+[1,2,1] binomial blur before each stride-2 conv (Zhang 2019, "Making Convolutional Networks
+Shift-Invariant Again") and bilinear instead of nearest upsampling. It has the same parameters,
+so the Magenta weights load into it unchanged.
 """
 import torch
 import torch.nn as nn
@@ -95,26 +100,42 @@ class ConditionalInstanceNorm(nn.Module):
 
 
 class ConvCIN(nn.Module):
-    def __init__(self, cin, cout, k, padding_mode, upsample=False):
+    def __init__(self, cin, cout, k, padding_mode, upsample=None):
         super().__init__()
-        self.upsample = upsample
+        if upsample is None:
+            self.upsample = nn.Identity()
+        else:
+            self.upsample = nn.Upsample(scale_factor=2.0, mode=upsample,
+                                        align_corners=False if upsample == "bilinear" else None)
         self.conv = nn.Conv2d(cin, cout, k, 1, k // 2, bias=False, padding_mode=padding_mode)
         self.norm = ConditionalInstanceNorm(cout)
 
     def forward(self, x, style):
-        if self.upsample:
-            x = F.interpolate(x, scale_factor=2.0, mode="nearest")
-        return self.norm(self.conv(x), style)
+        return self.norm(self.conv(self.upsample(x)), style)
+
+
+class Blur(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        k = torch.tensor([1.0, 2.0, 1.0])
+        kernel = (torch.outer(k, k) / 16).expand(channels, 1, 3, 3).contiguous()
+        self.register_buffer("kernel", kernel, persistent=False)
+
+    def forward(self, x):
+        return F.conv2d(F.pad(x, (1, 1, 1, 1), mode="replicate"), self.kernel, groups=self.kernel.shape[0])
 
 
 class ContractConv(nn.Module):
-    def __init__(self, cin, cout, k, stride, padding_mode):
+    def __init__(self, cin, cout, k, stride, padding_mode, antialias=False):
         super().__init__()
+        # Blurring the input of the strided conv equals blurring its stride-1 output before
+        # subsampling, so the pretrained kernels keep their meaning at no extra conv cost.
+        self.blur = Blur(cin) if antialias and stride > 1 else nn.Identity()
         self.conv = nn.Conv2d(cin, cout, k, stride, k // 2, bias=False, padding_mode=padding_mode)
         self.bn = nn.BatchNorm2d(cout, eps=1e-3)
 
     def forward(self, x):
-        return F.relu(self.bn(self.conv(x)))
+        return F.relu(self.bn(self.conv(self.blur(x))))
 
 
 class ResidualBlock(nn.Module):
@@ -131,18 +152,20 @@ class StyleTransformer(nn.Module):
     """padding_mode 'zeros' matches the TF.js graph (op Pad, no MirrorPad) and leaves a dark
     border; 'replicate' removes it."""
 
-    def __init__(self, padding_mode="zeros"):
+    def __init__(self, padding_mode="zeros", antialias=False):
         super().__init__()
+        self.padding_mode, self.antialias = padding_mode, antialias
         pm = padding_mode
+        up = "bilinear" if antialias else "nearest"
         self.contract = nn.Sequential(
             ContractConv(3, 32, 9, 1, pm),
-            ContractConv(32, 64, 3, 2, pm),
-            ContractConv(64, 128, 3, 2, pm),
+            ContractConv(32, 64, 3, 2, pm, antialias),
+            ContractConv(64, 128, 3, 2, pm, antialias),
         )
         self.residual = nn.ModuleList([ResidualBlock(128, pm) for _ in range(5)])
         self.expand = nn.ModuleList([
-            ConvCIN(128, 64, 3, pm, upsample=True),
-            ConvCIN(64, 32, 3, pm, upsample=True),
+            ConvCIN(128, 64, 3, pm, upsample=up),
+            ConvCIN(64, 32, 3, pm, upsample=up),
             ConvCIN(32, 3, 9, pm),
         ])
 
@@ -157,3 +180,11 @@ class StyleTransformer(nn.Module):
         x = F.relu(self.expand[0](x, style))
         x = F.relu(self.expand[1](x, style))
         return torch.sigmoid(self.expand[2](x, style))
+
+
+def load_checkpoint(path):
+    """A transformer saved by train_stable.py."""
+    ckpt = torch.load(path, map_location="cpu")
+    m = StyleTransformer(ckpt["padding"], ckpt["antialias"])
+    m.load_state_dict(ckpt["transformer"])
+    return m.eval()
