@@ -10,7 +10,7 @@ Needs Xcode 26+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew ins
 make generate   # creates StyleCam.xcodeproj from project.yml
 make build      # builds the app without signing (preview only)
 make run-demo   # runs that build on a video instead of the camera
-make install    # signed build, copied to /Applications
+make install    # signed Release build, copied to /Applications
 ```
 
 `make run-demo` plays `data/video/Johnny_1280x720_60.y4m` by default. Pass `VIDEO=path/to/file.y4m` and optionally `STYLE=great_wave`.

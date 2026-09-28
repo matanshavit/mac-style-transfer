@@ -1,5 +1,6 @@
 DERIVED := build/DerivedData
 APP := $(DERIVED)/Build/Products/Debug/StyleCam.app
+RELEASE_APP := $(DERIVED)/Build/Products/Release/StyleCam.app
 VIDEO ?= data/video/Johnny_1280x720_60.y4m
 STYLE ?=
 
@@ -13,13 +14,13 @@ build: generate
 		-derivedDataPath $(DERIVED) CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build
 
 build-signed: generate
-	xcodebuild -project StyleCam.xcodeproj -scheme StyleCam -configuration Debug \
+	xcodebuild -project StyleCam.xcodeproj -scheme StyleCam -configuration Release \
 		-derivedDataPath $(DERIVED) -allowProvisioningUpdates build
 
 # macOS only activates the camera extension from an app in /Applications.
 install: build-signed
 	rm -rf /Applications/StyleCam.app
-	ditto $(APP) /Applications/StyleCam.app
+	ditto $(RELEASE_APP) /Applications/StyleCam.app
 
 # Plays a y4m video instead of the camera, so it needs no camera permission.
 run-demo: build
